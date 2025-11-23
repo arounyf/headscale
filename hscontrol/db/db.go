@@ -749,7 +749,7 @@ AND auth_key_id NOT IN (
 					log.Info().Msg("Starting schema recreation with table renaming")
 
 					// Rename existing tables to _old versions
-					tablesToRename := []string{"users", "pre_auth_keys", "api_keys", "nodes", "policies"}
+					tablesToRename := []string{"users", "pre_auth_keys", "api_keys", "nodes", "policies","acl","log"}
 
 					// Check if routes table exists and drop it (should have been migrated already)
 					var routesExists bool
@@ -769,6 +769,10 @@ AND auth_key_id NOT IN (
 						"idx_name_no_provider_identifier",
 						"idx_api_keys_prefix",
 						"idx_policies_deleted_at",
+						// ================== 开始修改 2/3: 添加自定义表的索引 ==================
+						"idx_acl_user_id",
+						"idx_log_user_id",
+						// ================== 修改结束 2/3 ==================
 					}
 
 					for _, index := range indexesToDrop {
@@ -807,6 +811,7 @@ AND auth_key_id NOT IN (
   created_at datetime,
   updated_at datetime,
   deleted_at datetime,
+  
   password text,
   expire datetime,
   cellphone text,
@@ -866,6 +871,21 @@ AND auth_key_id NOT IN (
   updated_at datetime,
   deleted_at datetime
 )`,
+// ================== 开始修改 3/3: 添加自定义表的创建语句 ==================
+        `CREATE TABLE acl (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            acl TEXT,
+            user_id INTEGER,
+            CONSTRAINT fk_acl_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            content TEXT,
+            created_at DATETIME,
+            CONSTRAINT fk_log_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )`,
+        // ================== 修改结束 3/3 ==================
 					}
 
 					for _, createSQL := range tableCreationSQL {
@@ -894,6 +914,14 @@ AND auth_key_id NOT IN (
 						`INSERT INTO policies (id, data, created_at, updated_at, deleted_at)
              SELECT id, data, created_at, updated_at, deleted_at
              FROM policies_old`,
+			 // ================== 开始修改 4/4: 添加自定义表的数据复制语句 ==================
+        `INSERT INTO acl (id, acl, user_id)
+         SELECT id, acl, user_id
+         FROM acl_old`,
+        `INSERT INTO log (id, user_id, content, created_at)
+         SELECT id, user_id, content, created_at
+         FROM log_old`,
+        // ================== 修改结束 4/4 ==================
 					}
 
 					for _, copySQL := range dataCopySQL {
@@ -917,6 +945,10 @@ AND auth_key_id NOT IN (
 ) WHERE provider_identifier IS NULL`,
 						"CREATE UNIQUE INDEX idx_api_keys_prefix ON api_keys(prefix)",
 						"CREATE INDEX idx_policies_deleted_at ON policies(deleted_at)",
+						// ================== 开始修改 5/5: 添加自定义表的索引创建语句 ==================
+        "CREATE INDEX idx_acl_user_id ON acl(user_id)",
+        "CREATE INDEX idx_log_user_id ON log(user_id)",
+        // ================== 修改结束 5/5 ==================
 					}
 
 					for _, indexSQL := range indexes {
@@ -933,7 +965,7 @@ AND auth_key_id NOT IN (
 					}
 
 					log.Info().Msg("Schema recreation completed successfully")
-
+	
 					return nil
 				},
 				Rollback: func(db *gorm.DB) error { return nil },
