@@ -806,7 +806,14 @@ AND auth_key_id NOT IN (
   profile_pic_url text,
   created_at datetime,
   updated_at datetime,
-  deleted_at datetime
+  deleted_at datetime,
+  password text,
+  expire datetime,
+  cellphone text,
+  role text,
+  enable text,
+  route text,
+  node text
 )`,
 						`CREATE TABLE pre_auth_keys(
   id integer PRIMARY KEY AUTOINCREMENT,
@@ -869,10 +876,9 @@ AND auth_key_id NOT IN (
 
 					// Copy data directly using SQL
 					dataCopySQL := []string{
-						`INSERT INTO users (id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
-             SELECT id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at
-             FROM users_old`,
-
+						`INSERT INTO users (id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at, password, expire, cellphone, role, enable, route, node)
+     SELECT id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at, password, expire, cellphone, role, enable, route, node
+     FROM users_old`,
 						`INSERT INTO pre_auth_keys (id, key, user_id, reusable, ephemeral, used, tags, expiration, created_at)
              SELECT id, key, user_id, reusable, ephemeral, used, tags, expiration, created_at
              FROM pre_auth_keys_old`,
@@ -1024,6 +1030,15 @@ AND auth_key_id NOT IN (
 				// https://litestream.io/how-it-works
 				"_litestream_lock",
 				"_litestream_seq",
+				"acl",
+				"log",
+				"alembic_version",
+				// 忽略所有迁移过程中可能残留的旧表
+				"users_old",
+				"pre_auth_keys_old",
+				"api_keys_old",
+				"nodes_old",
+				"policies_old",
 			},
 		}
 
