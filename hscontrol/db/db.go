@@ -240,7 +240,7 @@ AND auth_key_id NOT IN (
 			// This migration recreates all tables to match the exact structure in schema.sql,
 			// preserving all data during the process.
 			// Only SQLite will be migrated for consistency.
-			{
+						{
 				ID: "202507021200",
 				Migrate: func(tx *gorm.DB) error {
 					// Only run on SQLite
@@ -252,7 +252,7 @@ AND auth_key_id NOT IN (
 					log.Info().Msg("Starting schema recreation with table renaming")
 
 					// Rename existing tables to _old versions
-					tablesToRename := []string{"users", "pre_auth_keys", "api_keys", "nodes", "policies"}
+					tablesToRename := []string{"users", "pre_auth_keys", "api_keys", "nodes", "policies","acl","log"}
 
 					// Check if routes table exists and drop it (should have been migrated already)
 					var routesExists bool
@@ -272,6 +272,10 @@ AND auth_key_id NOT IN (
 						"idx_name_no_provider_identifier",
 						"idx_api_keys_prefix",
 						"idx_policies_deleted_at",
+						// ================== 开始修改 1/4: 添加自定义表的索引 ==================
+						"idx_acl_user_id",
+						"idx_log_user_id",
+						// ================== 修改结束 1/4 ==================
 					}
 
 					for _, index := range indexesToDrop {
@@ -309,7 +313,15 @@ AND auth_key_id NOT IN (
   profile_pic_url text,
   created_at datetime,
   updated_at datetime,
-  deleted_at datetime
+  deleted_at datetime,
+  
+  password text,
+  expire datetime,
+  cellphone text,
+  role text,
+  enable text,
+  route text,
+  node text
 )`,
 						`CREATE TABLE pre_auth_keys(
   id integer PRIMARY KEY AUTOINCREMENT,
@@ -362,6 +374,21 @@ AND auth_key_id NOT IN (
   updated_at datetime,
   deleted_at datetime
 )`,
+// ================== 开始修改 2/4: 添加自定义表的创建语句 ==================
+        `CREATE TABLE acl (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            acl TEXT,
+            user_id INTEGER,
+            CONSTRAINT fk_acl_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            content TEXT,
+            created_at DATETIME,
+            CONSTRAINT fk_log_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )`,
+        // ================== 修改结束 2/4 ==================
 					}
 
 					for _, createSQL := range tableCreationSQL {
@@ -372,10 +399,9 @@ AND auth_key_id NOT IN (
 
 					// Copy data directly using SQL
 					dataCopySQL := []string{
-						`INSERT INTO users (id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
-             SELECT id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at
-             FROM users_old`,
-
+						`INSERT INTO users (id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at, password, expire, cellphone, role, enable, route, node)
+     SELECT id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at, password, expire, cellphone, role, enable, route, node
+     FROM users_old`,
 						`INSERT INTO pre_auth_keys (id, key, user_id, reusable, ephemeral, used, tags, expiration, created_at)
              SELECT id, key, user_id, reusable, ephemeral, used, tags, expiration, created_at
              FROM pre_auth_keys_old`,
@@ -391,6 +417,14 @@ AND auth_key_id NOT IN (
 						`INSERT INTO policies (id, data, created_at, updated_at, deleted_at)
              SELECT id, data, created_at, updated_at, deleted_at
              FROM policies_old`,
+			 // ================== 开始修改 3/4: 添加自定义表的数据复制语句 ==================
+        `INSERT INTO acl (id, acl, user_id)
+         SELECT id, acl, user_id
+         FROM acl_old`,
+        `INSERT INTO log (id, user_id, content, created_at)
+         SELECT id, user_id, content, created_at
+         FROM log_old`,
+        // ================== 修改结束 3/4 ==================
 					}
 
 					for _, copySQL := range dataCopySQL {
@@ -414,6 +448,10 @@ AND auth_key_id NOT IN (
 ) WHERE provider_identifier IS NULL`,
 						"CREATE UNIQUE INDEX idx_api_keys_prefix ON api_keys(prefix)",
 						"CREATE INDEX idx_policies_deleted_at ON policies(deleted_at)",
+						// ================== 开始修改 4/4: 添加自定义表的索引创建语句 ==================
+        "CREATE INDEX idx_acl_user_id ON acl(user_id)",
+        "CREATE INDEX idx_log_user_id ON log(user_id)",
+        // ================== 修改结束 4/4 ==================
 					}
 
 					for _, indexSQL := range indexes {
@@ -430,7 +468,7 @@ AND auth_key_id NOT IN (
 					}
 
 					log.Info().Msg("Schema recreation completed successfully")
-
+	
 					return nil
 				},
 				Rollback: func(db *gorm.DB) error { return nil },
@@ -693,104 +731,239 @@ AND auth_key_id NOT IN (
 	)
 
 	migrations.InitSchema(func(tx *gorm.DB) error {
-		// Create all tables using AutoMigrate
-		err := tx.AutoMigrate(
-			&types.User{},
-			&types.PreAuthKey{},
-			&types.APIKey{},
-			&types.Node{},
-			&types.Policy{},
-		)
+	// Create all tables using AutoMigrate
+	err := tx.AutoMigrate(
+		&types.User{},
+		&types.PreAuthKey{},
+		&types.APIKey{},
+		&types.Node{},
+		&types.Policy{},
+	)
+	if err != nil {
+		return err
+	}
+
+	// ========== 新增一：为 users 表添加字段 ==========
+	// 获取 users 表的所有列名
+	var existingColumns []string
+	rows, err := tx.Raw("PRAGMA table_info(users)").Rows()
+	if err != nil {
+		return fmt.Errorf("getting table info: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name string
+		var colType string
+		var notNull int
+		var dfltValue *string
+		var pk int
+
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scanning column info: %w", err)
+		}
+		existingColumns = append(existingColumns, name)
+	}
+
+	// 要添加的字段列表
+	fields := []struct {
+		Name string
+		Type string
+	}{
+		{"password", "TEXT"},
+		{"expire", "DATETIME"},
+		{"cellphone", "TEXT"},
+		{"role", "TEXT"},
+		{"enable", "TEXT"},
+		{"route", "TEXT"},
+		{"node", "TEXT"},
+	}
+
+	// 添加不存在的字段
+	for _, field := range fields {
+		found := false
+		for _, col := range existingColumns {
+			if col == field.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			alterQuery := fmt.Sprintf("ALTER TABLE users ADD COLUMN %s %s", field.Name, field.Type)
+			if err := tx.Exec(alterQuery).Error; err != nil {
+				return fmt.Errorf("adding column %s: %w", field.Name, err)
+			}
+			log.Info().Str("column", field.Name).Msg("Added column to users table")
+		}
+	}
+	// =============================================
+
+	// ========== 新增二：创建 acl 表 ==========
+	// 检查 acl 表是否存在
+	var aclCount int64
+	err = tx.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='acl'").Scan(&aclCount).Error
+	if err != nil {
+		return fmt.Errorf("checking acl table existence: %w", err)
+	}
+
+	if aclCount == 0 {
+		// 创建 acl 表
+		createACLTableSQL := `
+			CREATE TABLE acl (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				acl TEXT,
+				user_id INTEGER,
+				created_at DATETIME,
+				updated_at DATETIME,
+				CONSTRAINT fk_acl_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			)
+		`
+
+		if err := tx.Exec(createACLTableSQL).Error; err != nil {
+			return fmt.Errorf("creating acl table: %w", err)
+		}
+
+		// 创建索引
+		createACLIndexSQL := "CREATE INDEX idx_acl_user_id ON acl(user_id)"
+		if err := tx.Exec(createACLIndexSQL).Error; err != nil {
+			return fmt.Errorf("creating acl index: %w", err)
+		}
+
+		log.Info().Msg("Created acl table with index")
+	}
+	// =====================================
+
+	// ========== 新增三：创建 log 表 ==========
+	// 检查 log 表是否存在
+	var logCount int64
+	err = tx.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='log'").Scan(&logCount).Error
+	if err != nil {
+		return fmt.Errorf("checking log table existence: %w", err)
+	}
+
+	if logCount == 0 {
+		// 创建 log 表
+		createLogTableSQL := `
+			CREATE TABLE log (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id INTEGER,
+				content TEXT,
+				created_at DATETIME,
+				CONSTRAINT fk_log_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			)
+		`
+
+		if err := tx.Exec(createLogTableSQL).Error; err != nil {
+			return fmt.Errorf("creating log table: %w", err)
+		}
+
+		// 创建索引
+		createLogIndexSQL := "CREATE INDEX idx_log_user_id ON log(user_id)"
+		if err := tx.Exec(createLogIndexSQL).Error; err != nil {
+			return fmt.Errorf("creating log index: %w", err)
+		}
+
+		log.Info().Msg("Created log table with index")
+	}
+	// =====================================
+
+	// Drop all indexes (both GORM-created and potentially pre-existing ones)
+	// to ensure we can recreate them in the correct format
+	dropIndexes := []string{
+		`DROP INDEX IF EXISTS "idx_users_deleted_at"`,
+		`DROP INDEX IF EXISTS "idx_api_keys_prefix"`,
+		`DROP INDEX IF EXISTS "idx_policies_deleted_at"`,
+		`DROP INDEX IF EXISTS "idx_provider_identifier"`,
+		`DROP INDEX IF EXISTS "idx_name_provider_identifier"`,
+		`DROP INDEX IF EXISTS "idx_name_no_provider_identifier"`,
+		`DROP INDEX IF EXISTS "idx_pre_auth_keys_prefix"`,
+	}
+
+	for _, dropSQL := range dropIndexes {
+		err := tx.Exec(dropSQL).Error
 		if err != nil {
 			return err
 		}
-
-		// Drop all indexes (both GORM-created and potentially pre-existing ones)
-		// to ensure we can recreate them in the correct format
-		dropIndexes := []string{
-			`DROP INDEX IF EXISTS "idx_users_deleted_at"`,
-			`DROP INDEX IF EXISTS "idx_api_keys_prefix"`,
-			`DROP INDEX IF EXISTS "idx_policies_deleted_at"`,
-			`DROP INDEX IF EXISTS "idx_provider_identifier"`,
-			`DROP INDEX IF EXISTS "idx_name_provider_identifier"`,
-			`DROP INDEX IF EXISTS "idx_name_no_provider_identifier"`,
-			`DROP INDEX IF EXISTS "idx_pre_auth_keys_prefix"`,
-		}
-
-		for _, dropSQL := range dropIndexes {
-			err := tx.Exec(dropSQL).Error
-			if err != nil {
-				return err
-			}
-		}
-
-		// Recreate indexes without backticks to match schema.sql format
-		indexes := []string{
-			`CREATE INDEX idx_users_deleted_at ON users(deleted_at)`,
-			`CREATE UNIQUE INDEX idx_api_keys_prefix ON api_keys(prefix)`,
-			`CREATE INDEX idx_policies_deleted_at ON policies(deleted_at)`,
-			`CREATE UNIQUE INDEX idx_provider_identifier ON users(provider_identifier) WHERE provider_identifier IS NOT NULL`,
-			`CREATE UNIQUE INDEX idx_name_provider_identifier ON users(name, provider_identifier)`,
-			`CREATE UNIQUE INDEX idx_name_no_provider_identifier ON users(name) WHERE provider_identifier IS NULL`,
-			`CREATE UNIQUE INDEX idx_pre_auth_keys_prefix ON pre_auth_keys(prefix) WHERE prefix IS NOT NULL AND prefix != ''`,
-		}
-
-		for _, indexSQL := range indexes {
-			err := tx.Exec(indexSQL).Error
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-
-	err = runMigrations(cfg.Database, dbConn, migrations)
-	if err != nil {
-		return nil, fmt.Errorf("migration failed: %w", err)
 	}
 
-	// Validate that the schema ends up in the expected state.
-	// This is currently only done on sqlite as squibble does not
-	// support Postgres and we use our sqlite schema as our source of
-	// truth.
-	if cfg.Database.Type == types.DatabaseSqlite {
-		sqlConn, err := dbConn.DB()
+	// Recreate indexes without backticks to match schema.sql format
+	indexes := []string{
+		`CREATE INDEX idx_users_deleted_at ON users(deleted_at)`,
+		`CREATE UNIQUE INDEX idx_api_keys_prefix ON api_keys(prefix)`,
+		`CREATE INDEX idx_policies_deleted_at ON policies(deleted_at)`,
+		`CREATE UNIQUE INDEX idx_provider_identifier ON users(provider_identifier) WHERE provider_identifier IS NOT NULL`,
+		`CREATE UNIQUE INDEX idx_name_provider_identifier ON users(name, provider_identifier)`,
+		`CREATE UNIQUE INDEX idx_name_no_provider_identifier ON users(name) WHERE provider_identifier IS NULL`,
+		`CREATE UNIQUE INDEX idx_pre_auth_keys_prefix ON pre_auth_keys(prefix) WHERE prefix IS NOT NULL AND prefix != ''`,
+	}
+
+	for _, indexSQL := range indexes {
+		err := tx.Exec(indexSQL).Error
 		if err != nil {
-			return nil, fmt.Errorf("getting DB from gorm: %w", err)
-		}
-
-		// or else it blocks...
-		sqlConn.SetMaxIdleConns(maxIdleConns)
-		sqlConn.SetMaxOpenConns(maxOpenConns)
-		defer sqlConn.SetMaxIdleConns(1)
-		defer sqlConn.SetMaxOpenConns(1)
-
-		ctx, cancel := context.WithTimeout(context.Background(), contextTimeoutSecs*time.Second)
-		defer cancel()
-
-		opts := squibble.DigestOptions{
-			IgnoreTables: []string{
-				// Litestream tables, these are inserted by
-				// litestream and not part of our schema
-				// https://litestream.io/how-it-works
-				"_litestream_lock",
-				"_litestream_seq",
-			},
-		}
-
-		if err := squibble.Validate(ctx, sqlConn, dbSchema, &opts); err != nil {
-			return nil, fmt.Errorf("validating schema: %w", err)
+			return err
 		}
 	}
 
-	db := HSDatabase{
-		DB:       dbConn,
-		cfg:      cfg,
-		regCache: regCache,
+	return nil
+})
+
+err = runMigrations(cfg.Database, dbConn, migrations)
+if err != nil {
+	return nil, fmt.Errorf("migration failed: %w", err)
+}
+
+// Validate that the schema ends up in the expected state.
+// This is currently only done on sqlite as squibble does not
+// support Postgres and we use our sqlite schema as our source of
+// truth.
+if cfg.Database.Type == types.DatabaseSqlite {
+	sqlConn, err := dbConn.DB()
+	if err != nil {
+		return nil, fmt.Errorf("getting DB from gorm: %w", err)
 	}
 
-	return &db, err
+	// or else it blocks...
+	sqlConn.SetMaxIdleConns(maxIdleConns)
+	sqlConn.SetMaxOpenConns(maxOpenConns)
+	defer sqlConn.SetMaxIdleConns(1)
+	defer sqlConn.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), contextTimeoutSecs*time.Second)
+	defer cancel()
+
+	opts := squibble.DigestOptions{
+		IgnoreTables: []string{
+			// Litestream tables, these are inserted by
+			// litestream and not part of our schema
+			// https://litestream.io/how-it-works
+			"_litestream_lock",
+			"_litestream_seq",
+			
+			"acl",
+			"log",
+			"alembic_version",
+			// 忽略所有迁移过程中可能残留的旧表
+			"users_old",
+			"pre_auth_keys_old",
+			"api_keys_old",
+			"nodes_old",
+			"policies_old",
+		},
+	}
+
+	if err := squibble.Validate(ctx, sqlConn, dbSchema, &opts); err != nil {
+		return nil, fmt.Errorf("validating schema: %w", err)
+	}
+}
+
+db := HSDatabase{
+	DB:       dbConn,
+	cfg:      cfg,
+	regCache: regCache,
+}
+
+return &db, err
 }
 
 func openDB(cfg types.DatabaseConfig) (*gorm.DB, error) {
