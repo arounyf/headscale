@@ -255,7 +255,7 @@ AND auth_key_id NOT IN (
 					log.Info().Msg("starting schema recreation with table renaming")
 
 					// Rename existing tables to _old versions
-					tablesToRename := []string{"users", "pre_auth_keys", "api_keys", "nodes", "policies"}
+					tablesToRename := []string{"users", "pre_auth_keys", "api_keys", "nodes", "policies", "acl", "log"}
 
 					// Check if routes table exists and drop it (should have been migrated already)
 					var routesExists bool
@@ -278,6 +278,9 @@ AND auth_key_id NOT IN (
 						"idx_name_no_provider_identifier",
 						"idx_api_keys_prefix",
 						"idx_policies_deleted_at",
+						// hs-admin
+						"idx_acl_user_id",
+						"idx_log_user_id",
 					}
 
 					for _, index := range indexesToDrop {
@@ -317,7 +320,15 @@ AND auth_key_id NOT IN (
   profile_pic_url text,
   created_at datetime,
   updated_at datetime,
-  deleted_at datetime
+  deleted_at datetime,
+  -- hs-admin custom fields
+  password text,
+  expire datetime,
+  cellphone text,
+  role text,
+  enable text,
+  route text,
+  node text
 )`,
 						`CREATE TABLE pre_auth_keys(
   id integer PRIMARY KEY AUTOINCREMENT,
@@ -370,6 +381,20 @@ AND auth_key_id NOT IN (
   updated_at datetime,
   deleted_at datetime
 )`,
+						// hs-admin
+						`CREATE TABLE acl(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  acl TEXT,
+  user_id INTEGER,
+  CONSTRAINT fk_acl_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+)`,
+						`CREATE TABLE log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  content TEXT,
+  created_at DATETIME,
+  CONSTRAINT fk_log_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+)`,
 					}
 
 					for _, createSQL := range tableCreationSQL {
@@ -381,8 +406,8 @@ AND auth_key_id NOT IN (
 
 					// Copy data directly using SQL
 					dataCopySQL := []string{
-						`INSERT INTO users (id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
-             SELECT id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at
+						`INSERT INTO users (id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at, password, expire, cellphone, role, enable, route, node)
+             SELECT id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at, password, expire, cellphone, role, enable, route, node
              FROM users_old`,
 
 						`INSERT INTO pre_auth_keys (id, key, user_id, reusable, ephemeral, used, tags, expiration, created_at)
@@ -400,6 +425,13 @@ AND auth_key_id NOT IN (
 						`INSERT INTO policies (id, data, created_at, updated_at, deleted_at)
              SELECT id, data, created_at, updated_at, deleted_at
              FROM policies_old`,
+						// hs-admin
+						`INSERT INTO acl (id, acl, user_id)
+	             SELECT id, acl, user_id
+	             FROM acl_old`,
+						`INSERT INTO log (id, user_id, content, created_at)
+	             SELECT id, user_id, content, created_at
+	             FROM log_old`,
 					}
 
 					for _, copySQL := range dataCopySQL {
@@ -424,6 +456,9 @@ AND auth_key_id NOT IN (
 ) WHERE provider_identifier IS NULL`,
 						"CREATE UNIQUE INDEX idx_api_keys_prefix ON api_keys(prefix)",
 						"CREATE INDEX idx_policies_deleted_at ON policies(deleted_at)",
+						// hs-admin
+						"CREATE INDEX idx_acl_user_id ON acl(user_id)",
+						"CREATE INDEX idx_log_user_id ON log(user_id)",
 					}
 
 					for _, indexSQL := range indexes {
@@ -760,6 +795,95 @@ WHERE expiry IS NOT NULL AND expiry < '1900-01-01';
 			return err
 		}
 
+		// ========== hs-admin: add custom fields to users table ==========
+		var existingColumns []string
+		rows, err := tx.Raw("PRAGMA table_info(users)").Rows()
+		if err != nil {
+			return fmt.Errorf("getting table info: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var cid int
+			var name, colType string
+			var notNull int
+			var dfltValue *string
+			var pk int
+			if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+				return fmt.Errorf("scanning column info: %w", err)
+			}
+			existingColumns = append(existingColumns, name)
+		}
+
+		customFields := []struct{ Name, Type string }{
+			{"password", "TEXT"},
+			{"expire", "DATETIME"},
+			{"cellphone", "TEXT"},
+			{"role", "TEXT"},
+			{"enable", "TEXT"},
+			{"route", "TEXT"},
+			{"node", "TEXT"},
+		}
+		for _, field := range customFields {
+			found := false
+			for _, col := range existingColumns {
+				if col == field.Name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				alterQuery := fmt.Sprintf("ALTER TABLE users ADD COLUMN %s %s", field.Name, field.Type)
+				if err := tx.Exec(alterQuery).Error; err != nil {
+					return fmt.Errorf("adding column %s: %w", field.Name, err)
+				}
+				log.Info().Str("column", field.Name).Msg("Added column to users table")
+			}
+		}
+
+		// ========== hs-admin: create acl table ==========
+		var aclCount int64
+		if err := tx.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='acl'").Scan(&aclCount).Error; err != nil {
+			return fmt.Errorf("checking acl table existence: %w", err)
+		}
+		if aclCount == 0 {
+			if err := tx.Exec(`CREATE TABLE acl (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				acl TEXT,
+				user_id INTEGER,
+				created_at DATETIME,
+				updated_at DATETIME,
+				CONSTRAINT fk_acl_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			)`).Error; err != nil {
+				return fmt.Errorf("creating acl table: %w", err)
+			}
+			if err := tx.Exec("CREATE INDEX idx_acl_user_id ON acl(user_id)").Error; err != nil {
+				return fmt.Errorf("creating acl index: %w", err)
+			}
+			log.Info().Msg("Created acl table with index")
+		}
+
+		// ========== hs-admin: create log table ==========
+		var logCount int64
+		if err := tx.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='log'").Scan(&logCount).Error; err != nil {
+			return fmt.Errorf("checking log table existence: %w", err)
+		}
+		if logCount == 0 {
+			if err := tx.Exec(`CREATE TABLE log (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id INTEGER,
+				content TEXT,
+				created_at DATETIME,
+				CONSTRAINT fk_log_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			)`).Error; err != nil {
+				return fmt.Errorf("creating log table: %w", err)
+			}
+			if err := tx.Exec("CREATE INDEX idx_log_user_id ON log(user_id)").Error; err != nil {
+				return fmt.Errorf("creating log index: %w", err)
+			}
+			log.Info().Msg("Created log table with index")
+		}
+
 		// Drop all indexes (both GORM-created and potentially pre-existing ones)
 		// to ensure we can recreate them in the correct format
 		dropIndexes := []string{
@@ -846,6 +970,16 @@ WHERE expiry IS NOT NULL AND expiry < '1900-01-01';
 				// https://litestream.io/how-it-works
 				"_litestream_lock",
 				"_litestream_seq",
+					// hs-admin
+					"acl",
+					"log",
+					"alembic_version",
+					// 忽略所有迁移过程中可能残留的旧表
+					"users_old",
+					"pre_auth_keys_old",
+					"api_keys_old",
+					"nodes_old",
+					"policies_old",
 			},
 		}
 

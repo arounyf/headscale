@@ -15,7 +15,16 @@ CREATE TABLE users(
 
   created_at datetime,
   updated_at datetime,
-  deleted_at datetime
+  deleted_at datetime,
+
+  -- hs-admin custom fields
+  password text,
+  expire datetime,
+  cellphone text,
+  role text,
+  enable text,
+  route text,
+  node text
 );
 CREATE INDEX idx_users_deleted_at ON users(deleted_at);
 
