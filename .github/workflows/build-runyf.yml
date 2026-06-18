@@ -9,13 +9,6 @@ on:
 jobs:
   binary:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,14 +21,14 @@ jobs:
       - name: Build
         env:
           CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          GOOS: linux
+          GOARCH: amd64
         run: go build -ldflags="-s -w" -o headscale ./cmd/headscale
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: headscale-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: headscale-linux-amd64
           path: headscale
 
   release:
@@ -50,15 +43,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download binaries
+      - name: Download binary
         uses: actions/download-artifact@v4
         with:
-          pattern: headscale-*
-          merge-multiple: true
-          path: artifacts
+          name: headscale-linux-amd64
+          path: .
 
       - name: Generate release notes
-        id: notes
         run: |
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD~ 2>/dev/null || echo "")
           if [ -n "$PREV_TAG" ]; then
@@ -73,21 +64,10 @@ jobs:
             echo '```' >> /tmp/notes.md
           fi
 
-      - name: Package binaries
-        run: |
-          cd artifacts
-          mkdir -p ../release
-          for f in headscale-linux-*; do
-            arch=$(echo $f | sed 's/headscale-linux-//')
-            cp $f/headscale ../release/headscale-linux-${arch}
-          done
-
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           body_path: /tmp/notes.md
-          files: release/*
-          draft: false
-          prerelease: false
+          files: headscale
