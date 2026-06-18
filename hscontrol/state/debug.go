@@ -283,8 +283,15 @@ func (s *State) DebugRoutes() types.DebugRoutes {
 		debug.AvailableRoutes[nv.ID()] = approved
 	}
 
-	for prefix, id := range s.nodeStore.PrimaryRoutes() {
-		debug.PrimaryRoutes[prefix.String()] = id
+	for scope, userRoutes := range s.nodeStore.PrimaryRoutes() {
+		scopeLabel := "tagged"
+		if scope != 0 {
+			scopeLabel = fmt.Sprintf("user:%d", scope)
+		}
+		for prefix, id := range userRoutes {
+			key := fmt.Sprintf("[%s] %s", scopeLabel, prefix)
+			debug.PrimaryRoutes[key] = id
+		}
 	}
 
 	var unhealthy []types.NodeID

@@ -15,7 +15,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -648,7 +647,7 @@ func (s *State) Connect(id types.NodeID) ([]change.Change, uint64) {
 
 	log.Info().EmbedObject(node).Msg("node connected")
 
-	if !maps.Equal(prevRoutes, s.nodeStore.PrimaryRoutes()) {
+	if !PrimaryRoutesEqual(prevRoutes, s.nodeStore.PrimaryRoutes()) {
 		c = append(c, change.NodeAdded(id))
 	}
 
@@ -1018,7 +1017,7 @@ func (s *State) SetApprovedRoutes(nodeID types.NodeID, routes []netip.Prefix) (t
 
 	// PolicyChange fans out a fresh netmap whenever the new approved
 	// set shifted a primary advertiser.
-	routeChange := !maps.Equal(prevRoutes, s.nodeStore.PrimaryRoutes())
+	routeChange := !PrimaryRoutesEqual(prevRoutes, s.nodeStore.PrimaryRoutes())
 	if routeChange || !c.IsFull() {
 		c = change.PolicyChange()
 	}
@@ -1235,20 +1234,38 @@ func (s *State) RoutesForPeer(
 	matchers []matcher.Match,
 ) []netip.Prefix {
 	viaResult := s.polMan.ViaRoutesForPeer(viewer, peer)
-	globalPrimaries := s.nodeStore.PrimaryRoutesForNode(peer.ID())
+
+	// All primaries across every scope (for via checks and co-router
+	// visibility — these need the full picture).
+	allPrimaries := s.nodeStore.PrimaryRoutesForNode(peer.ID())
+
+	// Viewable primaries: only prefixes from scopes the viewer can see
+	// (own user + tagged/global). This is the multi-tenant boundary.
+	viewerScope := types.UserID(0)
+	if !viewer.IsTagged() {
+		viewerScope = viewer.TypedUserID()
+	}
+	visibleRoutes := s.nodeStore.ScopedRoutes(viewerScope)
+	primaries := make([]netip.Prefix, 0, len(allPrimaries))
+	for _, p := range allPrimaries {
+		if _, ok := visibleRoutes[p]; ok {
+			primaries = append(primaries, p)
+		}
+	}
+
 	exitRoutes := peer.ExitRoutes()
 
 	var reduced []netip.Prefix
 
 	// Fast path: no via grants affect this pair.
 	if len(viaResult.Include) == 0 && len(viaResult.Exclude) == 0 {
-		allRoutes := slices.Concat(globalPrimaries, exitRoutes)
+		allRoutes := slices.Concat(primaries, exitRoutes)
 
 		reduced = policy.ReduceRoutes(viewer, allRoutes, matchers)
 	} else {
 		// Slow path: drop excluded routes, reduce, append via-included.
-		routes := make([]netip.Prefix, 0, len(globalPrimaries)+len(exitRoutes))
-		for _, p := range slices.Concat(globalPrimaries, exitRoutes) {
+		routes := make([]netip.Prefix, 0, len(primaries)+len(exitRoutes))
+		for _, p := range slices.Concat(primaries, exitRoutes) {
 			if !slices.Contains(viaResult.Exclude, p) {
 				routes = append(routes, p)
 			}
@@ -1271,7 +1288,7 @@ func (s *State) RoutesForPeer(
 				continue
 			}
 
-			if slices.Contains(globalPrimaries, p) {
+			if slices.Contains(allPrimaries, p) {
 				reduced = append(reduced, p)
 			} else if !slices.Contains(viaResult.UsePrimary, p) {
 				reduced = append(reduced, p)
@@ -1285,9 +1302,13 @@ func (s *State) RoutesForPeer(
 	// know which peer is primary for their shared prefix.
 	viewerSubnets := viewer.SubnetRoutes()
 	if len(viewerSubnets) > 0 {
-		for _, p := range globalPrimaries {
+		for _, p := range allPrimaries {
 			if slices.Contains(viewerSubnets, p) && !slices.Contains(reduced, p) {
-				reduced = append(reduced, p)
+				// Only add if the viewer can see routes from this scope
+				// (own user or tagged), maintaining multi-tenant isolation.
+				if _, ok := visibleRoutes[p]; ok {
+					reduced = append(reduced, p)
+				}
 			}
 		}
 	}
@@ -1346,7 +1367,7 @@ func (s *State) BatchSetNodeHealth(updates map[types.NodeID]bool) bool {
 
 	s.nodeStore.UpdateNodes(fns)
 
-	return !maps.Equal(prevRoutes, s.nodeStore.PrimaryRoutes())
+	return !PrimaryRoutesEqual(prevRoutes, s.nodeStore.PrimaryRoutes())
 }
 
 // healthSetter returns an UpdateNodeFunc that flips n.Unhealthy to
@@ -2968,7 +2989,7 @@ func (s *State) UpdateNodeFromMapRequest(id types.NodeID, req tailcfg.MapRequest
 	// snapshot diff catches that.
 	nodeRouteChange := change.Change{}
 
-	if !maps.Equal(prevRoutes, s.nodeStore.PrimaryRoutes()) {
+	if !PrimaryRoutesEqual(prevRoutes, s.nodeStore.PrimaryRoutes()) {
 		log.Debug().
 			Caller().
 			Uint64(zf.NodeID, id.Uint64()).

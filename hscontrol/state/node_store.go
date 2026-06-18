@@ -156,10 +156,13 @@ type Snapshot struct {
 	nodesByUser       map[types.UserID][]types.NodeView
 	allNodes          []types.NodeView
 
-	// routes maps each prefix to its current primary advertiser. The
-	// previous assignment is carried over when still valid so the
+	// routes maps each prefix to its current primary advertiser,
+	// scoped by user. routes[0] holds tagged-node (global) primaries;
+	// routes[userID>0] holds per-user primaries so one user's subnet
+	// routers cannot become primaries for another user's peers.
+	// The previous assignment is carried over when still valid so the
 	// primary does not flap on every unrelated batch.
-	routes         map[netip.Prefix]types.NodeID
+	routes         map[types.UserID]map[netip.Prefix]types.NodeID
 	isPrimaryRoute map[types.NodeID]bool
 }
 
@@ -611,7 +614,7 @@ func resolveGivenName(nodes map[types.NodeID]types.Node, self types.NodeID, base
 func snapshotFromNodes(
 	nodes map[types.NodeID]types.Node,
 	peersFunc PeersFunc,
-	prevRoutes map[netip.Prefix]types.NodeID,
+	prevRoutes map[types.UserID]map[netip.Prefix]types.NodeID,
 ) Snapshot {
 	timer := prometheus.NewTimer(nodeStoreSnapshotBuildDuration)
 	defer timer.ObserveDuration()
@@ -670,18 +673,56 @@ func snapshotFromNodes(
 }
 
 // electPrimaryRoutes picks the primary advertiser for each non-exit
-// prefix. Inputs are restricted to online nodes that advertise the
-// prefix. The previous primary is preserved when it is still online
-// and healthy (anti-flap); otherwise the lowest-NodeID healthy
-// advertiser wins. When every advertiser is unhealthy the previous
-// primary is preserved only if still a candidate — falling back to
-// any other candidate would point peers at a node the prober has
-// already declared unreachable, so leaving the prefix unmapped is
-// preferred until a probe cycle finds one that responds.
+// prefix, scoped by user (multi-tenant isolation). Tagged nodes
+// (IsTagged()) are grouped into scope 0 (global); user-owned nodes
+// are grouped by [Node.TypedUserID]. Each scope runs an independent
+// election so one user's subnet routers never become primaries for
+// another user's peers.
+//
+// The previous primary is preserved when it is still online and
+// healthy (anti-flap); otherwise the lowest-NodeID healthy advertiser
+// wins. When every advertiser is unhealthy the previous primary is
+// preserved only if still a candidate.
 func electPrimaryRoutes(
 	nodes map[types.NodeID]types.Node,
+	prev map[types.UserID]map[netip.Prefix]types.NodeID,
+) (map[types.UserID]map[netip.Prefix]types.NodeID, map[types.NodeID]bool) {
+	// Group nodes by scope: tagged → 0, user-owned → TypedUserID()
+	scoped := make(map[types.UserID]map[types.NodeID]types.Node)
+	for id, n := range nodes {
+		scope := types.UserID(0)
+		if !n.IsTagged() {
+			scope = n.TypedUserID()
+		}
+		if scoped[scope] == nil {
+			scoped[scope] = make(map[types.NodeID]types.Node)
+		}
+		scoped[scope][id] = n
+	}
+
+	routes := make(map[types.UserID]map[netip.Prefix]types.NodeID, len(scoped))
+	for scope, scopedNodes := range scoped {
+		prevScope := prev[scope]
+		routes[scope] = electOneScope(scopedNodes, prevScope)
+	}
+
+	isPrimaryRoute := make(map[types.NodeID]bool)
+	for _, userRoutes := range routes {
+		for _, id := range userRoutes {
+			isPrimaryRoute[id] = true
+		}
+	}
+
+	return routes, isPrimaryRoute
+}
+
+// electOneScope runs the primary election for a single user scope
+// (either one user or the tagged/global scope). It is the single-tenant
+// election algorithm previously inlined in electPrimaryRoutes.
+func electOneScope(
+	nodes map[types.NodeID]types.Node,
 	prev map[netip.Prefix]types.NodeID,
-) (map[netip.Prefix]types.NodeID, map[types.NodeID]bool) {
+) map[netip.Prefix]types.NodeID {
 	ids := make([]types.NodeID, 0, len(nodes))
 	for id := range nodes {
 		ids = append(ids, id)
@@ -746,12 +787,7 @@ func electPrimaryRoutes(
 		}
 	}
 
-	isPrimaryRoute := make(map[types.NodeID]bool, len(routes))
-	for _, id := range routes {
-		isPrimaryRoute[id] = true
-	}
-
-	return routes, isPrimaryRoute
+	return routes
 }
 
 // GetNode retrieves a node by its ID.
@@ -889,14 +925,21 @@ func (s *NodeStore) ListPeers(id types.NodeID) views.Slice[types.NodeView] {
 	return views.SliceOf(s.data.Load().peersByNode[id])
 }
 
-// PrimaryRouteFor returns the current primary advertiser for prefix.
-func (s *NodeStore) PrimaryRouteFor(prefix netip.Prefix) (types.NodeID, bool) {
-	id, ok := s.data.Load().routes[prefix]
+// PrimaryRouteFor returns the current primary advertiser for prefix
+// within the given user scope. scope==0 queries the tagged/global
+// primary set; scope>0 queries a user-specific primary set.
+func (s *NodeStore) PrimaryRouteFor(scope types.UserID, prefix netip.Prefix) (types.NodeID, bool) {
+	snap := s.data.Load()
+	userRoutes, ok := snap.routes[scope]
+	if !ok {
+		return 0, false
+	}
+	id, ok := userRoutes[prefix]
 	return id, ok
 }
 
 // PrimaryRoutesForNode returns the prefixes for which id is the current
-// primary advertiser.
+// primary advertiser (across all user scopes — both tagged and per-user).
 func (s *NodeStore) PrimaryRoutesForNode(id types.NodeID) []netip.Prefix {
 	snap := s.data.Load()
 	if !snap.isPrimaryRoute[id] {
@@ -905,13 +948,34 @@ func (s *NodeStore) PrimaryRoutesForNode(id types.NodeID) []netip.Prefix {
 
 	out := make([]netip.Prefix, 0)
 
-	for prefix, nodeID := range snap.routes {
-		if nodeID == id {
-			out = append(out, prefix)
+	for _, userRoutes := range snap.routes {
+		for prefix, nodeID := range userRoutes {
+			if nodeID == id {
+				out = append(out, prefix)
+			}
 		}
 	}
 
 	return out
+}
+
+// ScopedRoutes returns the effective primary-route map for a viewer
+// identified by scope. User-owned viewers (scope>0) see their own
+// user routes plus the tagged/global scope; tagged viewers (scope==0)
+// see only the tagged/global scope. The returned map merges both
+// and is safe to read (a fresh copy).
+func (s *NodeStore) ScopedRoutes(scope types.UserID) map[netip.Prefix]types.NodeID {
+	snap := s.data.Load()
+	result := make(map[netip.Prefix]types.NodeID)
+	if tagged, ok := snap.routes[0]; ok {
+		maps.Copy(result, tagged)
+	}
+	if scope != 0 {
+		if userRoutes, ok := snap.routes[scope]; ok {
+			maps.Copy(result, userRoutes)
+		}
+	}
+	return result
 }
 
 // HANodes returns the prefixes with two or more online advertisers, the
@@ -961,31 +1025,60 @@ func (s *NodeStore) IsNodeHealthy(id types.NodeID) bool {
 	return !n.Unhealthy
 }
 
-// PrimaryRoutes returns the snapshot's prefix→primary map. The map is
-// owned by the snapshot and must not be mutated; it is safe to read
-// concurrently because snapshots are immutable once published.
-func (s *NodeStore) PrimaryRoutes() map[netip.Prefix]types.NodeID {
+// PrimaryRoutes returns the snapshot's per-user prefix→primary maps.
+// routes[0] is the tagged/global scope; routes[userID>0] are per-user.
+// The maps are owned by the snapshot and must not be mutated.
+func (s *NodeStore) PrimaryRoutes() map[types.UserID]map[netip.Prefix]types.NodeID {
 	return s.data.Load().routes
 }
 
-// PrimaryRoutesString renders the snapshot's prefix→primary map for
-// debug output and test diagnostics.
+// PrimaryRoutesEqual reports whether two per-user route maps are equal.
+func PrimaryRoutesEqual(a, b map[types.UserID]map[netip.Prefix]types.NodeID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for scope, aRoutes := range a {
+		bRoutes, ok := b[scope]
+		if !ok {
+			return false
+		}
+		if !maps.Equal(aRoutes, bRoutes) {
+			return false
+		}
+	}
+	return true
+}
+
+// PrimaryRoutesString renders the snapshot's per-user prefix→primary
+// assignment for debug output and test diagnostics.
 func (s *NodeStore) PrimaryRoutesString() string {
 	snap := s.data.Load()
 	if len(snap.routes) == 0 {
 		return ""
 	}
 
-	prefixes := make([]netip.Prefix, 0, len(snap.routes))
-	for p := range snap.routes {
-		prefixes = append(prefixes, p)
+	scopes := make([]types.UserID, 0, len(snap.routes))
+	for scope := range snap.routes {
+		scopes = append(scopes, scope)
 	}
-
-	slices.SortFunc(prefixes, netip.Prefix.Compare)
+	slices.Sort(scopes)
 
 	var b strings.Builder
-	for _, p := range prefixes {
-		fmt.Fprintf(&b, "%s: %d\n", p, snap.routes[p])
+	for _, scope := range scopes {
+		userRoutes := snap.routes[scope]
+		prefixes := make([]netip.Prefix, 0, len(userRoutes))
+		for p := range userRoutes {
+			prefixes = append(prefixes, p)
+		}
+		slices.SortFunc(prefixes, netip.Prefix.Compare)
+
+		label := "tagged"
+		if scope != 0 {
+			label = fmt.Sprintf("user:%d", scope)
+		}
+		for _, p := range prefixes {
+			fmt.Fprintf(&b, "[%s] %s: %d\n", label, p, userRoutes[p])
+		}
 	}
 
 	return b.String()

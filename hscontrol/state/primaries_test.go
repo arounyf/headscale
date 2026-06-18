@@ -88,19 +88,21 @@ func (f *primariesFixture) healthy(id types.NodeID) {
 	})
 }
 
-// requirePrimary asserts that prefix has node id as its primary.
-func (f *primariesFixture) requirePrimary(prefix netip.Prefix, id types.NodeID) {
+// requirePrimary asserts that prefix has node id as its primary in
+// the given scope (0 = tagged/global, or use a specific UserID).
+func (f *primariesFixture) requirePrimary(scope types.UserID, prefix netip.Prefix, id types.NodeID) {
 	f.t.Helper()
-	got, ok := f.ns.PrimaryRouteFor(prefix)
-	require.True(f.t, ok, "expected a primary for %s, got none", prefix)
-	require.Equal(f.t, id, got, "primary for %s", prefix)
+	got, ok := f.ns.PrimaryRouteFor(scope, prefix)
+	require.True(f.t, ok, "expected a primary for [%d] %s, got none", scope, prefix)
+	require.Equal(f.t, id, got, "primary for [%d] %s", scope, prefix)
 }
 
-// requireNoPrimary asserts that prefix has no primary at all.
-func (f *primariesFixture) requireNoPrimary(prefix netip.Prefix) {
+// requireNoPrimary asserts that prefix has no primary at all in the
+// given scope.
+func (f *primariesFixture) requireNoPrimary(scope types.UserID, prefix netip.Prefix) {
 	f.t.Helper()
-	_, ok := f.ns.PrimaryRouteFor(prefix)
-	require.False(f.t, ok, "expected no primary for %s", prefix)
+	_, ok := f.ns.PrimaryRouteFor(scope, prefix)
+	require.False(f.t, ok, "expected no primary for [%d] %s", scope, prefix)
 }
 
 // requireNodeRoutes asserts the set of prefixes for which id is the
@@ -122,7 +124,7 @@ func TestPrimaries_SingleNodeSingleRoute(t *testing.T) {
 	f := newPrimariesFixture(t, 1)
 	f.advertise(1, mp("192.168.1.0/24"))
 
-	f.requirePrimary(mp("192.168.1.0/24"), 1)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 1)
 	f.requireNodeRoutes(1, mp("192.168.1.0/24"))
 }
 
@@ -131,8 +133,8 @@ func TestPrimaries_TwoNodesDifferentRoutes(t *testing.T) {
 	f.advertise(1, mp("192.168.1.0/24"))
 	f.advertise(2, mp("192.168.2.0/24"))
 
-	f.requirePrimary(mp("192.168.1.0/24"), 1)
-	f.requirePrimary(mp("192.168.2.0/24"), 2)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 1)
+	f.requirePrimary(types.UserID(1),mp("192.168.2.0/24"), 2)
 }
 
 func TestPrimaries_OverlappingRoutesLowerIDWins(t *testing.T) {
@@ -140,7 +142,7 @@ func TestPrimaries_OverlappingRoutesLowerIDWins(t *testing.T) {
 	f.advertise(1, mp("192.168.1.0/24"))
 	f.advertise(2, mp("192.168.1.0/24"))
 
-	f.requirePrimary(mp("192.168.1.0/24"), 1)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 1)
 	f.requireNodeRoutes(1, mp("192.168.1.0/24"))
 	f.requireNodeRoutes(2)
 }
@@ -152,41 +154,41 @@ func TestPrimaries_AntiFlapPreservesCurrentPrimary(t *testing.T) {
 	f := newPrimariesFixture(t, 1, 2)
 	f.advertise(1, mp("192.168.1.0/24"))
 	f.advertise(2, mp("192.168.1.0/24"))
-	f.requirePrimary(mp("192.168.1.0/24"), 1)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 1)
 
 	f.disconnect(1)
-	f.requirePrimary(mp("192.168.1.0/24"), 2)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 2)
 
 	f.advertise(1, mp("192.168.1.0/24"))
-	f.requirePrimary(mp("192.168.1.0/24"), 2)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 2)
 }
 
 func TestPrimaries_ClearRoutesDropsPrimary(t *testing.T) {
 	f := newPrimariesFixture(t, 1)
 	f.advertise(1, mp("192.168.1.0/24"))
-	f.requirePrimary(mp("192.168.1.0/24"), 1)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 1)
 
 	f.approveRoutes(1)
-	f.requireNoPrimary(mp("192.168.1.0/24"))
+	f.requireNoPrimary(types.UserID(1),mp("192.168.1.0/24"))
 }
 
 func TestPrimaries_DisconnectDropsLastAdvertiserPrimary(t *testing.T) {
 	f := newPrimariesFixture(t, 1)
 	f.advertise(1, mp("192.168.1.0/24"))
-	f.requirePrimary(mp("192.168.1.0/24"), 1)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 1)
 
 	f.disconnect(1)
-	f.requireNoPrimary(mp("192.168.1.0/24"))
+	f.requireNoPrimary(types.UserID(1),mp("192.168.1.0/24"))
 }
 
 func TestPrimaries_UnhealthyTriggersFailover(t *testing.T) {
 	f := newPrimariesFixture(t, 1, 2)
 	f.advertise(1, mp("192.168.1.0/24"))
 	f.advertise(2, mp("192.168.1.0/24"))
-	f.requirePrimary(mp("192.168.1.0/24"), 1)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 1)
 
 	f.unhealthy(1)
-	f.requirePrimary(mp("192.168.1.0/24"), 2)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 2)
 }
 
 func TestPrimaries_RecoveryFromUnhealthyNoFlap(t *testing.T) {
@@ -194,10 +196,10 @@ func TestPrimaries_RecoveryFromUnhealthyNoFlap(t *testing.T) {
 	f.advertise(1, mp("192.168.1.0/24"))
 	f.advertise(2, mp("192.168.1.0/24"))
 	f.unhealthy(1)
-	f.requirePrimary(mp("192.168.1.0/24"), 2)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 2)
 
 	f.healthy(1)
-	f.requirePrimary(mp("192.168.1.0/24"), 2)
+	f.requirePrimary(types.UserID(1),mp("192.168.1.0/24"), 2)
 }
 
 func TestPrimaries_AllUnhealthyKeepsAPrimary(t *testing.T) {
@@ -213,7 +215,7 @@ func TestPrimaries_AllUnhealthyKeepsAPrimary(t *testing.T) {
 	f.unhealthy(1)
 	f.unhealthy(2)
 
-	_, ok := f.ns.PrimaryRouteFor(prefix)
+	_, ok := f.ns.PrimaryRouteFor(types.UserID(1), prefix)
 	require.True(t, ok, "all-unhealthy must still produce some primary")
 }
 
@@ -228,13 +230,13 @@ func TestPrimaries_AllUnhealthyPreservesPrevious(t *testing.T) {
 	f := newPrimariesFixture(t, 1, 2)
 	f.advertise(1, prefix)
 	f.advertise(2, prefix)
-	f.requirePrimary(prefix, 1)
+	f.requirePrimary(types.UserID(1),prefix, 1)
 
 	f.unhealthy(1)
-	f.requirePrimary(prefix, 2)
+	f.requirePrimary(types.UserID(1),prefix, 2)
 
 	f.unhealthy(2)
-	f.requirePrimary(prefix, 2)
+	f.requirePrimary(types.UserID(1),prefix, 2)
 }
 
 func TestPrimaries_ExitRouteNotElected(t *testing.T) {
@@ -244,7 +246,7 @@ func TestPrimaries_ExitRouteNotElected(t *testing.T) {
 	exitV4 := mp("0.0.0.0/0")
 	f.advertise(1, exitV4)
 
-	f.requireNoPrimary(exitV4)
+	f.requireNoPrimary(types.UserID(1),exitV4)
 }
 
 func TestPrimaries_BothOfflineThenOneReturns(t *testing.T) {
@@ -256,16 +258,16 @@ func TestPrimaries_BothOfflineThenOneReturns(t *testing.T) {
 	f := newPrimariesFixture(t, 1, 2)
 	f.advertise(1, prefix)
 	f.advertise(2, prefix)
-	f.requirePrimary(prefix, 1)
+	f.requirePrimary(types.UserID(1),prefix, 1)
 
 	f.disconnect(1)
-	f.requirePrimary(prefix, 2)
+	f.requirePrimary(types.UserID(1),prefix, 2)
 
 	f.disconnect(2)
-	f.requireNoPrimary(prefix)
+	f.requireNoPrimary(types.UserID(1),prefix)
 
 	f.advertise(2, prefix)
-	f.requirePrimary(prefix, 2)
+	f.requirePrimary(types.UserID(1),prefix, 2)
 }
 
 func TestPrimaries_HANodes(t *testing.T) {

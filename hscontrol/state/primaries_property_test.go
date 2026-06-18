@@ -243,7 +243,7 @@ func checkPrimariesProperties(
 			continue
 		}
 
-		got, ok := ns.PrimaryRouteFor(p)
+		got, ok := ns.PrimaryRouteFor(types.UserID(1), p)
 		if !ok {
 			rt.Fatalf(
 				"prefix %s has at least one advertiser in the model but no primary in NodeStore",
@@ -262,7 +262,15 @@ func checkPrimariesProperties(
 	// Structural invariants on the live snapshot, independent of the
 	// model. These catch shapes the model alone cannot — e.g. an owner
 	// that is offline but still has the prefix attributed to it.
-	snapshotPrimaries := ns.PrimaryRoutes()
+	allPrimaries := ns.PrimaryRoutes()
+		// Extract scope-1 routes (all test nodes share UserID=1). Also
+		// merge scope-0 (tagged) for safety.
+		snapshotPrimaries := make(map[netip.Prefix]types.NodeID, len(allPrimaries))
+		for scope, routes := range allPrimaries {
+			if scope == 0 || scope == types.UserID(1) {
+				maps.Copy(snapshotPrimaries, routes)
+			}
+		}
 
 	// A primary that owns ≥1 prefix in `routes` must also light up
 	// `isPrimaryRoute` (PrimaryRoutesForNode returns nil unless the
@@ -379,13 +387,16 @@ func nodeForRapid(id types.NodeID) types.Node {
 }
 
 // snapshotPrimariesCopy returns a defensive copy of the snapshot's
-// prefix→primary map so the caller can compare against a later
-// snapshot without aliasing the live map.
-func snapshotPrimariesCopy(ns *NodeStore) map[netip.Prefix]types.NodeID {
+// per-user prefix→primary map so the caller can compare against a
+// later snapshot without aliasing the live map. Returns a flat map
+// for the given scope (all test nodes have UserID=1).
+func snapshotPrimariesCopy(ns *NodeStore, scope types.UserID) map[netip.Prefix]types.NodeID {
 	live := ns.PrimaryRoutes()
 
 	out := make(map[netip.Prefix]types.NodeID, len(live))
-	maps.Copy(out, live)
+	if scoped, ok := live[scope]; ok {
+		maps.Copy(out, scoped)
+	}
 
 	return out
 }
@@ -462,7 +473,7 @@ func TestPrimaryRoutesProperty(t *testing.T) {
 			// anti-flap invariant has a stable reference. Reading
 			// after the model has already changed would compare a
 			// stale snapshot to a moved model.
-			prevPrimaries := snapshotPrimariesCopy(ns)
+			prevPrimaries := snapshotPrimariesCopy(ns, types.UserID(1))
 
 			switch op {
 			case 0: // ConnectAdvertise — Connect path clears Unhealthy.
