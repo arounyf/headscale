@@ -1248,7 +1248,7 @@ func (s *State) RoutesForPeer(
 	visibleRoutes := s.nodeStore.ScopedRoutes(viewerScope)
 	primaries := make([]netip.Prefix, 0, len(allPrimaries))
 	for _, p := range allPrimaries {
-		if _, ok := visibleRoutes[p]; ok {
+		if primaryNode, ok := visibleRoutes[p]; ok && primaryNode == peer.ID() {
 			primaries = append(primaries, p)
 		}
 	}

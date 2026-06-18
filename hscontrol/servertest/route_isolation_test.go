@@ -131,6 +131,104 @@ func TestPerUserPrimaryRoutes_HAFailover(t *testing.T) {
 		"offline r1 should no longer be primary")
 }
 
+// TestSameRouteCrossUser verifies that when two users each advertise the
+// SAME route prefix, each user's nodes can only see their own user's route
+// and primary election operates independently within each user scope.
+func TestSameRouteCrossUser(t *testing.T) {
+	srv := servertest.NewServer(t)
+
+	userA := srv.CreateUser(t, "tenant-a")
+	userB := srv.CreateUser(t, "tenant-b")
+
+	// User A: two routers advertising same prefix (HA pair)
+	aR1 := servertest.NewClient(t, srv, "a-r1", servertest.WithUser(userA))
+	aR2 := servertest.NewClient(t, srv, "a-r2", servertest.WithUser(userA))
+	// User A: one regular node
+	aNode := servertest.NewClient(t, srv, "a-node", servertest.WithUser(userA))
+
+	// User B: one router advertising same prefix as A
+	bR1 := servertest.NewClient(t, srv, "b-r1", servertest.WithUser(userB))
+	// User B: one regular node
+	bNode := servertest.NewClient(t, srv, "b-node", servertest.WithUser(userB))
+
+	aR1.WaitForPeers(t, 4, routeIsoTimeout)
+	aR2.WaitForPeers(t, 4, routeIsoTimeout)
+	aNode.WaitForPeers(t, 4, routeIsoTimeout)
+	bR1.WaitForPeers(t, 4, routeIsoTimeout)
+	bNode.WaitForPeers(t, 4, routeIsoTimeout)
+
+	// All advertise the SAME route prefix
+	sameRoute := netip.MustParsePrefix("10.42.0.0/24")
+	advertiseAndApproveRoute(t, srv, aR1, sameRoute)
+	advertiseAndApproveRoute(t, srv, aR2, sameRoute)
+	advertiseAndApproveRoute(t, srv, bR1, sameRoute)
+
+	aNodeID := findNodeID(t, srv, "a-node")
+	bNodeID := findNodeID(t, srv, "b-node")
+	aR1ID := findNodeID(t, srv, "a-r1")
+	aR2ID := findNodeID(t, srv, "a-r2")
+	bR1ID := findNodeID(t, srv, "b-r1")
+
+	aNodeView, _ := srv.State().GetNodeByID(aNodeID)
+	bNodeView, _ := srv.State().GetNodeByID(bNodeID)
+	aR1View, _ := srv.State().GetNodeByID(aR1ID)
+	aR2View, _ := srv.State().GetNodeByID(aR2ID)
+	bR1View, _ := srv.State().GetNodeByID(bR1ID)
+
+	aMatchers, _ := srv.State().MatchersForNode(aNodeView)
+	bMatchers, _ := srv.State().MatchersForNode(bNodeView)
+
+	t.Run("same-user sees primary routes", func(t *testing.T) {
+		// a-node sees 10.42.0.0/24 from a-r1 (a-r1 is primary)
+		routes := srv.State().RoutesForPeer(aNodeView, aR1View, aMatchers)
+		require.True(t, slices.Contains(routes, sameRoute),
+			"a-node should see a-r1's route %s, got %v", sameRoute, routes)
+
+		// a-node does NOT see 10.42.0.0/24 from a-r2 (not primary, a-r1 is)
+		routes = srv.State().RoutesForPeer(aNodeView, aR2View, aMatchers)
+		require.False(t, slices.Contains(routes, sameRoute),
+			"a-node should NOT see a-r2's route (a-r1 is primary), got %v", routes)
+
+		// b-node sees 10.42.0.0/24 from b-r1 (b-r1 is primary in tenant-b)
+		routes = srv.State().RoutesForPeer(bNodeView, bR1View, bMatchers)
+		require.True(t, slices.Contains(routes, sameRoute),
+			"b-node should see b-r1's route %s, got %v", sameRoute, routes)
+	})
+
+	t.Run("cross-user same-route isolated", func(t *testing.T) {
+		// a-node looking at b-r1: should NOT see b-r1's 10.42.0.0/24
+		routes := srv.State().RoutesForPeer(aNodeView, bR1View, aMatchers)
+		require.False(t, slices.Contains(routes, sameRoute),
+			"a-node should NOT see b-r1's route (cross-tenant leak!), got %v", routes)
+
+		// b-node looking at a-r1: should NOT see a-r1's 10.42.0.0/24
+		routes = srv.State().RoutesForPeer(bNodeView, aR1View, bMatchers)
+		require.False(t, slices.Contains(routes, sameRoute),
+			"b-node should NOT see a-r1's route (cross-tenant leak!), got %v", routes)
+
+		// b-node looking at a-r2: should NOT see a-r2's 10.42.0.0/24
+		routes = srv.State().RoutesForPeer(bNodeView, aR2View, bMatchers)
+		require.False(t, slices.Contains(routes, sameRoute),
+			"b-node should NOT see a-r2's route (cross-tenant leak!), got %v", routes)
+	})
+
+	t.Run("per-user primary election independent", func(t *testing.T) {
+		// Within user A, the lower-ID router should be primary
+		aPrimaries := srv.State().GetNodePrimaryRoutes(aR1ID)
+		require.True(t, slices.Contains(aPrimaries, sameRoute),
+			"a-r1 (lower ID) should be primary for %s in tenant-a, got %v", sameRoute, aPrimaries)
+
+		aR2Primaries := srv.State().GetNodePrimaryRoutes(aR2ID)
+		require.False(t, slices.Contains(aR2Primaries, sameRoute),
+			"a-r2 should NOT be primary while a-r1 is healthy")
+
+		// Within user B, b-r1 is the only router so it should be primary
+		bPrimaries := srv.State().GetNodePrimaryRoutes(bR1ID)
+		require.True(t, slices.Contains(bPrimaries, sameRoute),
+			"b-r1 should be primary for %s in tenant-b, got %v", sameRoute, bPrimaries)
+	})
+}
+
 // TestPerUserPrimaryRoutes_ExitRouteUnaffected verifies that exit routes
 // (0.0.0.0/0, ::/0) are excluded from primary election regardless of
 // per-user scoping — they are not subject to HA failover.
@@ -166,4 +264,276 @@ func TestPerUserPrimaryRoutes_ExitRouteUnaffected(t *testing.T) {
 		"0.0.0.0/0 should not be elected as primary route")
 	require.False(t, slices.Contains(primaries, exitV6),
 		"::/0 should not be elected as primary route")
+}
+
+// ── 边界场景 ──
+
+// TestUnapprovedRouteNotVisible verifies that a route is not visible to
+// anyone until it has been approved via SetApprovedRoutes.
+func TestUnapprovedRouteNotVisible(t *testing.T) {
+	srv := servertest.NewServer(t)
+	user := srv.CreateUser(t, "tenant")
+
+	router := servertest.NewClient(t, srv, "router", servertest.WithUser(user))
+	viewer := servertest.NewClient(t, srv, "viewer", servertest.WithUser(user))
+
+	router.WaitForPeers(t, 1, routeIsoTimeout)
+	viewer.WaitForPeers(t, 1, routeIsoTimeout)
+
+	route := netip.MustParsePrefix("10.99.0.0/24")
+
+	// Advertise but do NOT approve
+	router.Direct().SetHostinfo(&tailcfg.Hostinfo{
+		BackendLogID: "servertest-r",
+		Hostname:     "router",
+		RoutableIPs:  []netip.Prefix{route},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = router.Direct().SendUpdate(ctx)
+
+	routerID := findNodeID(t, srv, "router")
+	viewerID := findNodeID(t, srv, "viewer")
+	routerView, _ := srv.State().GetNodeByID(routerID)
+	viewerView, _ := srv.State().GetNodeByID(viewerID)
+	m, _ := srv.State().MatchersForNode(viewerView)
+
+	routes := srv.State().RoutesForPeer(viewerView, routerView, m)
+	require.False(t, slices.Contains(routes, route),
+		"unapproved route should NOT be visible, got %v", routes)
+
+	// Primary routes also shouldn't include unapproved
+	primaries := srv.State().GetNodePrimaryRoutes(routerID)
+	require.False(t, slices.Contains(primaries, route),
+		"unapproved route should not be primary, got %v", primaries)
+}
+
+// TestMultipleRoutesPerUser verifies a user can have multiple distinct
+// routes, all visible to their own nodes and isolated from other users.
+func TestMultipleRoutesPerUser(t *testing.T) {
+	srv := servertest.NewServer(t)
+
+	userA := srv.CreateUser(t, "tenant-a")
+	userB := srv.CreateUser(t, "tenant-b")
+
+	aRouter := servertest.NewClient(t, srv, "a-router", servertest.WithUser(userA))
+	aNode := servertest.NewClient(t, srv, "a-node", servertest.WithUser(userA))
+	bRouter := servertest.NewClient(t, srv, "b-router", servertest.WithUser(userB))
+
+	aRouter.WaitForPeers(t, 2, routeIsoTimeout)
+	aNode.WaitForPeers(t, 2, routeIsoTimeout)
+	bRouter.WaitForPeers(t, 2, routeIsoTimeout)
+
+	r1 := netip.MustParsePrefix("10.10.0.0/24")
+	r2 := netip.MustParsePrefix("10.20.0.0/24")
+	r3 := netip.MustParsePrefix("192.168.0.0/16")
+
+	// A advertises r1+r2, B advertises r3
+	advertiseAndApproveRoute(t, srv, aRouter, r1)
+	advertiseAndApproveRoute(t, srv, aRouter, r2)
+	advertiseAndApproveRoute(t, srv, bRouter, r3)
+
+	aNodeID := findNodeID(t, srv, "a-node")
+	aRouterID := findNodeID(t, srv, "a-router")
+	bRouterID := findNodeID(t, srv, "b-router")
+
+	aNodeView, _ := srv.State().GetNodeByID(aNodeID)
+	aRouterView, _ := srv.State().GetNodeByID(aRouterID)
+	bRouterView, _ := srv.State().GetNodeByID(bRouterID)
+	aMatchers, _ := srv.State().MatchersForNode(aNodeView)
+
+	// A's node sees both of A's routes
+	routes := srv.State().RoutesForPeer(aNodeView, aRouterView, aMatchers)
+	require.True(t, slices.Contains(routes, r1), "a-node should see r1")
+	require.True(t, slices.Contains(routes, r2), "a-node should see r2")
+
+	// A's node does NOT see B's route
+	routes = srv.State().RoutesForPeer(aNodeView, bRouterView, aMatchers)
+	require.False(t, slices.Contains(routes, r3),
+		"a-node should NOT see b-router's r3 (cross-tenant), got %v", routes)
+
+	// All three are primary for their respective owners
+	primaries := srv.State().GetNodePrimaryRoutes(aRouterID)
+	require.True(t, slices.Contains(primaries, r1))
+	require.True(t, slices.Contains(primaries, r2))
+
+	bPrimaries := srv.State().GetNodePrimaryRoutes(bRouterID)
+	require.True(t, slices.Contains(bPrimaries, r3))
+}
+
+// TestIPv6Routes verifies IPv6 subnet routes respect the same per-user
+// isolation as IPv4 routes.
+func TestIPv6Routes(t *testing.T) {
+	srv := servertest.NewServer(t)
+
+	userA := srv.CreateUser(t, "tenant-a")
+	userB := srv.CreateUser(t, "tenant-b")
+
+	aRouter := servertest.NewClient(t, srv, "a-r6", servertest.WithUser(userA))
+	aNode := servertest.NewClient(t, srv, "a-node6", servertest.WithUser(userA))
+	bRouter := servertest.NewClient(t, srv, "b-r6", servertest.WithUser(userB))
+
+	aRouter.WaitForPeers(t, 2, routeIsoTimeout)
+	aNode.WaitForPeers(t, 2, routeIsoTimeout)
+	bRouter.WaitForPeers(t, 2, routeIsoTimeout)
+
+	v6A := netip.MustParsePrefix("fd00:42::/48")
+	v6B := netip.MustParsePrefix("fd00:43::/48")
+
+	advertiseAndApproveRoute(t, srv, aRouter, v6A)
+	advertiseAndApproveRoute(t, srv, bRouter, v6B)
+
+	aNodeID := findNodeID(t, srv, "a-node6")
+	aRouterID := findNodeID(t, srv, "a-r6")
+	bRouterID := findNodeID(t, srv, "b-r6")
+
+	aNodeView, _ := srv.State().GetNodeByID(aNodeID)
+	aRouterView, _ := srv.State().GetNodeByID(aRouterID)
+	bRouterView, _ := srv.State().GetNodeByID(bRouterID)
+	aMatchers, _ := srv.State().MatchersForNode(aNodeView)
+
+	// Same-user IPv6 visible
+	routes := srv.State().RoutesForPeer(aNodeView, aRouterView, aMatchers)
+	require.True(t, slices.Contains(routes, v6A),
+		"a-node should see a-router's IPv6 route %s, got %v", v6A, routes)
+
+	// Cross-user IPv6 isolated
+	routes = srv.State().RoutesForPeer(aNodeView, bRouterView, aMatchers)
+	require.False(t, slices.Contains(routes, v6B),
+		"a-node should NOT see b-router's IPv6 route (cross-tenant), got %v", routes)
+
+	// Primary election works for IPv6
+	primaries := srv.State().GetNodePrimaryRoutes(aRouterID)
+	require.True(t, slices.Contains(primaries, v6A))
+}
+
+// TestRouteOverlap verifies that overlapping routes (e.g. supernet in
+// user A, subnet in user B) remain isolated — each user only sees their
+// own approved prefix.
+func TestRouteOverlap(t *testing.T) {
+	srv := servertest.NewServer(t)
+
+	userA := srv.CreateUser(t, "tenant-a")
+	userB := srv.CreateUser(t, "tenant-b")
+
+	aRouter := servertest.NewClient(t, srv, "a-super", servertest.WithUser(userA))
+	aNode := servertest.NewClient(t, srv, "a-n", servertest.WithUser(userA))
+	bRouter := servertest.NewClient(t, srv, "b-sub", servertest.WithUser(userB))
+
+	aRouter.WaitForPeers(t, 2, routeIsoTimeout)
+	aNode.WaitForPeers(t, 2, routeIsoTimeout)
+	bRouter.WaitForPeers(t, 2, routeIsoTimeout)
+
+	// A advertises 10.0.0.0/8 (supernet), B advertises 10.42.0.0/24 (subnet)
+	supernet := netip.MustParsePrefix("10.0.0.0/8")
+	subnet := netip.MustParsePrefix("10.42.0.0/24")
+
+	advertiseAndApproveRoute(t, srv, aRouter, supernet)
+	advertiseAndApproveRoute(t, srv, bRouter, subnet)
+
+	aNodeID := findNodeID(t, srv, "a-n")
+	aRouterID := findNodeID(t, srv, "a-super")
+	bRouterID := findNodeID(t, srv, "b-sub")
+
+	aNodeView, _ := srv.State().GetNodeByID(aNodeID)
+	aRouterView, _ := srv.State().GetNodeByID(aRouterID)
+	bRouterView, _ := srv.State().GetNodeByID(bRouterID)
+	aMatchers, _ := srv.State().MatchersForNode(aNodeView)
+
+	// A sees its own supernet
+	routes := srv.State().RoutesForPeer(aNodeView, aRouterView, aMatchers)
+	require.True(t, slices.Contains(routes, supernet))
+
+	// A does NOT see B's subnet (different user, even though it's inside the supernet)
+	routes = srv.State().RoutesForPeer(aNodeView, bRouterView, aMatchers)
+	require.False(t, slices.Contains(routes, subnet),
+		"A should NOT see B's subnet route (cross-tenant), got %v", routes)
+
+	// Primary election is per-user, per-prefix — independent
+	aPrimaries := srv.State().GetNodePrimaryRoutes(aRouterID)
+	require.True(t, slices.Contains(aPrimaries, supernet))
+	bPrimaries := srv.State().GetNodePrimaryRoutes(bRouterID)
+	require.True(t, slices.Contains(bPrimaries, subnet))
+}
+
+// TestOfflineNodeLosesPrimary verifies that when a node goes offline, it
+// is removed from the primary set and a healthy node (if any) takes over.
+func TestOfflineNodeLosesPrimary(t *testing.T) {
+	srv := servertest.NewServer(t)
+	user := srv.CreateUser(t, "tenant")
+
+	r1 := servertest.NewClient(t, srv, "r1", servertest.WithUser(user))
+	r2 := servertest.NewClient(t, srv, "r2", servertest.WithUser(user))
+
+	r1.WaitForPeers(t, 1, routeIsoTimeout)
+	r2.WaitForPeers(t, 1, routeIsoTimeout)
+
+	route := netip.MustParsePrefix("10.50.0.0/24")
+	r1ID := advertiseAndApproveRoute(t, srv, r1, route)
+	r2ID := advertiseAndApproveRoute(t, srv, r2, route)
+
+	// r1 (lower ID) is primary
+	require.True(t, slices.Contains(srv.State().GetNodePrimaryRoutes(r1ID), route))
+
+	// r1 goes offline
+	r1.Disconnect(t)
+
+	// r2 should take over
+	require.Eventually(t, func() bool {
+		return slices.Contains(srv.State().GetNodePrimaryRoutes(r2ID), route)
+	}, routeIsoTimeout, 200*time.Millisecond,
+		"r2 should become primary after r1 goes offline")
+
+	// r1 should no longer be primary
+	require.False(t, slices.Contains(srv.State().GetNodePrimaryRoutes(r1ID), route))
+}
+
+// TestCrossUserHAPairs verifies that each user can independently have
+// an HA pair for the same route, and failover in one user does not
+// affect the other.
+func TestCrossUserHAPairs(t *testing.T) {
+	srv := servertest.NewServer(t)
+
+	userA := srv.CreateUser(t, "tenant-a")
+	userB := srv.CreateUser(t, "tenant-b")
+
+	aR1 := servertest.NewClient(t, srv, "a-r1", servertest.WithUser(userA))
+	aR2 := servertest.NewClient(t, srv, "a-r2", servertest.WithUser(userA))
+	bR1 := servertest.NewClient(t, srv, "b-r1", servertest.WithUser(userB))
+	bR2 := servertest.NewClient(t, srv, "b-r2", servertest.WithUser(userB))
+
+	aR1.WaitForPeers(t, 3, routeIsoTimeout)
+	aR2.WaitForPeers(t, 3, routeIsoTimeout)
+	bR1.WaitForPeers(t, 3, routeIsoTimeout)
+	bR2.WaitForPeers(t, 3, routeIsoTimeout)
+
+	sameRoute := netip.MustParsePrefix("10.42.0.0/24")
+	aR1ID := advertiseAndApproveRoute(t, srv, aR1, sameRoute)
+	aR2ID := advertiseAndApproveRoute(t, srv, aR2, sameRoute)
+	bR1ID := advertiseAndApproveRoute(t, srv, bR1, sameRoute)
+	bR2ID := advertiseAndApproveRoute(t, srv, bR2, sameRoute)
+
+	// Each user: lower-ID is primary
+	require.True(t, slices.Contains(srv.State().GetNodePrimaryRoutes(aR1ID), sameRoute),
+		"a-r1 should be primary in tenant-a")
+	require.False(t, slices.Contains(srv.State().GetNodePrimaryRoutes(aR2ID), sameRoute),
+		"a-r2 should NOT be primary while a-r1 is healthy")
+	require.True(t, slices.Contains(srv.State().GetNodePrimaryRoutes(bR1ID), sameRoute),
+		"b-r1 should be primary in tenant-b")
+	require.False(t, slices.Contains(srv.State().GetNodePrimaryRoutes(bR2ID), sameRoute),
+		"b-r2 should NOT be primary while b-r1 is healthy")
+
+	// Failover in A: disconnect a-r1
+	aR1.Disconnect(t)
+
+	require.Eventually(t, func() bool {
+		return slices.Contains(srv.State().GetNodePrimaryRoutes(aR2ID), sameRoute)
+	}, routeIsoTimeout, 200*time.Millisecond,
+		"a-r2 should take over in tenant-a")
+
+	// B's primary should be UNCHANGED — b-r1 still primary
+	require.True(t, slices.Contains(srv.State().GetNodePrimaryRoutes(bR1ID), sameRoute),
+		"b-r1 should STILL be primary in tenant-b after A's failover")
+	require.False(t, slices.Contains(srv.State().GetNodePrimaryRoutes(bR2ID), sameRoute),
+		"b-r2 should STILL not be primary")
 }
