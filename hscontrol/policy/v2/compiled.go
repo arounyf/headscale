@@ -758,6 +758,18 @@ func compileAutogroupSelf(
 						},
 					)
 				}
+				// Include same-user subnet routes so
+				// autogroup:self:* covers advertised
+				// subnets as well as node IPs.
+				for _, route := range n.SubnetRoutes() {
+					destPorts = append(
+						destPorts,
+						tailcfg.NetPortRange{
+							IP:    route.String(),
+							Ports: port,
+						},
+					)
+				}
 			}
 		}
 
