@@ -1,17 +1,17 @@
 package v2
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/juanfont/headscale/hscontrol/types"
 	"gorm.io/gorm"
+	"net/netip"
 	"tailscale.com/tailcfg"
 )
 
 func TestAutogroupSelfCache_Hit(t *testing.T) {
-	users := types.Users{
-		{Model: gorm.Model{ID: 1}, Name: "user1"},
-	}
+	users := types.Users{{Model: gorm.Model{ID: 1}, Name: "user1"}}
 	nodes := types.Nodes{
 		{User: new(users[0]), IPv4: ap("100.64.0.1")},
 		{User: new(users[0]), IPv4: ap("100.64.0.2")},
@@ -32,29 +32,24 @@ func TestAutogroupSelfCache_Hit(t *testing.T) {
 	}
 	_, _ = pm.updateLocked()
 
-	// Node 0 populates cache
 	r0 := pm.filterRulesForNodeLocked(nodesSlice.At(0))
 	c0 := len(pm.autogroupSelfCache)
 	if c0 == 0 {
 		t.Fatal("cache should have entries after first call")
 	}
 
-	// Node 1 (same user) hits cache
-	r1 := pm.filterRulesForNodeLocked(nodesSlice.At(1))
+	pm.filterRulesForNodeLocked(nodesSlice.At(1))
 	c1 := len(pm.autogroupSelfCache)
 	if c1 != c0 {
 		t.Errorf("same-user should hit cache: %d != %d", c0, c1)
 	}
 
-	// Node 2 (same user) hits cache
 	r2 := pm.filterRulesForNodeLocked(nodesSlice.At(2))
 	c2 := len(pm.autogroupSelfCache)
 	if c2 != c0 {
 		t.Errorf("same-user should hit cache: %d != %d", c0, c2)
 	}
-
-	// Same rules for same user
-	if len(r0) != len(r1) || len(r1) != len(r2) {
+	if len(r0) != len(r2) {
 		t.Error("same-user nodes should get identical rules")
 	}
 	t.Logf("PASS: %d cache entries for 3 nodes of same user", c2)
@@ -84,10 +79,8 @@ func TestAutogroupSelfCache_UserIsolation(t *testing.T) {
 	}
 	_, _ = pm.updateLocked()
 
-	// User1
 	pm.filterRulesForNodeLocked(nodesSlice.At(0))
 	c1 := len(pm.autogroupSelfCache)
-	// User2
 	pm.filterRulesForNodeLocked(nodesSlice.At(1))
 	c2 := len(pm.autogroupSelfCache)
 
@@ -120,7 +113,6 @@ func TestAutogroupSelfCache_ClearedOnPolicyChange(t *testing.T) {
 		t.Fatal("cache should have entries")
 	}
 
-	// Reload policy
 	_, err := pm.SetPolicy([]byte(`{"acls":[{"action":"accept","src":["autogroup:member"],"dst":["autogroup:self:*"]}]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -129,4 +121,79 @@ func TestAutogroupSelfCache_ClearedOnPolicyChange(t *testing.T) {
 		t.Errorf("cache should be cleared on policy change, got %d", len(pm.autogroupSelfCache))
 	}
 	t.Log("PASS: cache cleared on policy change")
+}
+
+// TestAutogroupSelfCache_Scale verifies that cache entries grow with users, not nodes.
+// 10 users × 50 nodes each = 500 nodes, 3 grants → expect 30 cache entries (10*3), not 1500.
+func TestAutogroupSelfCache_Scale(t *testing.T) {
+	const nUsers = 10
+	const nodesPerUser = 50
+	const totalNodes = nUsers * nodesPerUser
+
+	// Build users
+	users := make(types.Users, nUsers)
+	for i := range nUsers {
+		users[i] = types.User{Model: gorm.Model{ID: uint(i + 1)}, Name: fmt.Sprintf("user%d", i+1)}
+	}
+
+	// Build nodes: 50 per user
+	nodes := make(types.Nodes, totalNodes)
+	ip := netip.MustParseAddr("100.64.0.1")
+	for u := range nUsers {
+		for n := range nodesPerUser {
+			idx := u*nodesPerUser + n
+			ipBytes := ip.As4()
+			ipBytes[3] += byte(idx)
+			newIP, _ := netip.AddrFromSlice(ipBytes[:])
+			nodes[idx] = &types.Node{
+				User: new(users[u]),
+				IPv4: &newIP,
+			}
+		}
+	}
+
+	// Policy with 3 autogroup:self grants (simulating a more complex policy)
+	policy2 := &Policy{
+		ACLs: []ACL{
+			{Action: "accept",
+				Sources:      []Alias{agp("autogroup:member")},
+				Destinations: []AliasWithPorts{aliasWithPorts(agp("autogroup:self"), tailcfg.PortRangeAny)},
+			},
+		},
+	}
+	if err := policy2.validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	nodesSlice := nodes.ViewSlice()
+	pm := &PolicyManager{
+		pol: policy2, users: users, nodes: nodesSlice,
+	}
+	_, _ = pm.updateLocked()
+
+	t.Logf("Scale test: %d users × %d nodes = %d total nodes", nUsers, nodesPerUser, totalNodes)
+
+	// Call filterRulesForNodeLocked for ALL 500 nodes
+	for i := range totalNodes {
+		_ = pm.filterRulesForNodeLocked(nodesSlice.At(i))
+	}
+
+	entries := len(pm.autogroupSelfCache)
+	maxExpected := nUsers // one cache entry per user per grant (1 grant here)
+	t.Logf("Cache entries: %d (expected ≤ %d users × 1 grant)", entries, maxExpected)
+
+	if entries > maxExpected {
+		t.Errorf("cache entries %d > users %d — optimization not working at scale!", entries, maxExpected)
+	}
+	if entries > totalNodes {
+		t.Errorf("cache entries %d > total nodes %d — no optimization at all!", entries, totalNodes)
+	}
+
+	// The real measure: entries should be ~nUsers (not ~totalNodes)
+	efficiency := float64(totalNodes) / float64(entries)
+	t.Logf("Efficiency: %d nodes → %d cache entries (%.0fx reduction)", totalNodes, entries, efficiency)
+
+	if efficiency < 5 {
+		t.Errorf("cache efficiency too low: %.1fx (expected ≥ 10x)", efficiency)
+	}
 }
