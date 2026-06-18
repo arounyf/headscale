@@ -236,6 +236,7 @@ func (pm *PolicyManager) updateLocked() (bool, error) {
 	// Compile all grants once. Both global and per-node filter
 	// rules are derived from these compiled grants.
 	pm.compiledGrants = pm.pol.compileGrants(pm.users, pm.nodes)
+	clear(pm.autogroupSelfCache)
 	pm.userNodeIdx = buildUserNodeIndex(pm.nodes)
 	pm.needsPerNodeFilter = hasPerNodeGrants(pm.compiledGrants)
 	pm.viaTargetTags = collectViaTargetTags(pm.compiledGrants)
