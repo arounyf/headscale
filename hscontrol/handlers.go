@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -303,14 +304,28 @@ func NewAuthProviderWeb(serverURL, adminURL string) *AuthProviderWeb {
 }
 
 func (a *AuthProviderWeb) RegisterURL(authID types.AuthID) string {
-	base := a.serverURL
-	if a.adminURL != "" {
-		base = a.adminURL
+	base := a.adminURL
+	if base == "" {
+		// 未配 admin_url 时自动从 server_url 推导，去掉 headscale 端口
+		base = stripPort(a.serverURL)
 	}
 	return fmt.Sprintf(
 		"%s/register/%s",
 		strings.TrimSuffix(base, "/"),
 		authID.String())
+}
+
+// stripPort removes the port from a URL if present, keeping scheme and host.
+func stripPort(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	// Keep only scheme + host, drop port and path
+	if u.Port() != "" {
+		u.Host = u.Hostname()
+	}
+	return u.String()
 }
 
 func (a *AuthProviderWeb) AuthURL(authID types.AuthID) string {
@@ -375,7 +390,7 @@ func (a *AuthProviderWeb) RegisterHandler(
 		return
 	}
 
-	// 如果配置了管理后台地址，重定向到管理后台的注册页面
+	// 如果显式配置了 admin_url，重定向到管理后台地址
 	if a.adminURL != "" {
 		target := fmt.Sprintf("%s/register/%s",
 			strings.TrimSuffix(a.adminURL, "/"),
