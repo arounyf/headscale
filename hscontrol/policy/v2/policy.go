@@ -71,6 +71,12 @@ type PolicyManager struct {
 	// is true; the fast path returns pm.matchers directly.
 	matchersForNodeMap map[types.NodeID][]matcher.Match
 
+	// autogroupSelfCache caches compileAutogroupSelf results keyed by
+	// (grant index, user ID). Same-user nodes share identical expansion
+	// — this avoids redundant nested-loop work. Cleared on policy reload;
+	// selectively invalidated on node changes for affected users.
+	autogroupSelfCache map[autogroupSelfCacheKey][]tailcfg.FilterRule
+
 	// needsPerNodeFilter is true when any compiled grant requires
 	// per-node work (autogroup:self or via grants).
 	needsPerNodeFilter bool
@@ -357,6 +363,7 @@ func (pm *PolicyManager) updateLocked() (bool, error) {
 		clear(pm.sshPolicyMap)
 		clear(pm.filterRulesMap)
 		clear(pm.matchersForNodeMap)
+		clear(pm.autogroupSelfCache)
 	}
 
 	// If nothing changed, no need to update nodes
@@ -699,13 +706,56 @@ func (pm *PolicyManager) BuildPeerMap(nodes views.Slice[types.NodeView]) map[typ
 
 // filterRulesForNodeLocked returns the unreduced compiled filter rules
 // for a node, combining pre-compiled global rules with per-node self
-// and via rules from the stored compiled grants.
+// and via rules from the stored compiled grants. autogroup:self expansion
+// is cached per-user so same-user nodes share the result.
 func (pm *PolicyManager) filterRulesForNodeLocked(
 	node types.NodeView,
 ) []tailcfg.FilterRule {
-	return filterRulesForNode(
-		pm.compiledGrants, node, pm.userNodeIdx,
-	)
+	if pm.autogroupSelfCache == nil {
+		pm.autogroupSelfCache = make(map[autogroupSelfCacheKey][]tailcfg.FilterRule)
+	}
+
+	// Tagged nodes don't participate in autogroup:self.
+	if node.IsTagged() {
+		var rules []tailcfg.FilterRule
+		for i := range pm.compiledGrants {
+			cg := &pm.compiledGrants[i]
+			rules = append(rules, cg.rules...)
+			if cg.category == grantCategoryVia {
+				rules = append(rules, compileViaForNode(cg, node)...)
+			}
+		}
+		return mergeFilterRules(rules)
+	}
+
+	if !node.User().Valid() {
+		return filterRulesForNode(pm.compiledGrants, node, pm.userNodeIdx)
+	}
+
+	uid := types.UserID(node.User().ID())
+	var rules []tailcfg.FilterRule
+
+	for i := range pm.compiledGrants {
+		cg := &pm.compiledGrants[i]
+		rules = append(rules, cg.rules...)
+
+		switch cg.category {
+		case grantCategoryRegular:
+		case grantCategorySelf:
+			key := autogroupSelfCacheKey{grantIdx: i, userID: uid}
+			if cached, ok := pm.autogroupSelfCache[key]; ok {
+				rules = append(rules, cached...)
+			} else {
+				expanded := compileAutogroupSelf(cg, node, pm.userNodeIdx)
+				pm.autogroupSelfCache[key] = expanded
+				rules = append(rules, expanded...)
+			}
+		case grantCategoryVia:
+			rules = append(rules, compileViaForNode(cg, node)...)
+		}
+	}
+
+	return mergeFilterRules(rules)
 }
 
 // filterForNodeLocked returns the filter rules for a specific node,
@@ -814,6 +864,7 @@ func (pm *PolicyManager) SetUsers(users []types.User) (bool, error) {
 	// This ensures that if SSH policy compilation previously failed due to missing users,
 	// it will be retried with the new user list
 	clear(pm.sshPolicyMap)
+	clear(pm.autogroupSelfCache)
 
 	changed, err := pm.updateLocked()
 	if err != nil {
@@ -869,6 +920,7 @@ func (pm *PolicyManager) SetNodes(nodes views.Slice[types.NodeView]) (bool, erro
 			clear(pm.sshPolicyMap)
 			clear(pm.filterRulesMap)
 			clear(pm.matchersForNodeMap)
+				clear(pm.autogroupSelfCache)
 		}
 		// Always return true when nodes changed, even if filter hash didn't change
 		// (can happen with autogroup:self or when nodes are added but don't affect rules)
@@ -1525,6 +1577,13 @@ func (pm *PolicyManager) invalidateAutogroupSelfCache(oldNodes, newNodes views.S
 			// Node not found in either old or new list, clear it
 			delete(pm.filterRulesMap, nodeID)
 			delete(pm.matchersForNodeMap, nodeID)
+		}
+	}
+
+	// Clear per-user autogroup:self expansion cache for affected users
+	for key := range pm.autogroupSelfCache {
+		if _, affected := affectedUsers[key.userID]; affected {
+			delete(pm.autogroupSelfCache, key)
 		}
 	}
 

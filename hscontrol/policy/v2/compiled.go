@@ -65,6 +65,14 @@ type selfGrantData struct {
 	app               tailcfg.PeerCapMap
 }
 
+// autogroupSelfCacheKey identifies a cached compileAutogroupSelf result.
+// grantIdx is the index into PolicyManager.compiledGrants, stable within
+// a single updateLocked cycle.
+type autogroupSelfCacheKey struct {
+	grantIdx int
+	userID   types.UserID
+}
+
 // viaGrantData holds data needed for per-node via-grant compilation.
 // Sources are already resolved into srcIPStrings; destinations are
 // pre-resolved into prefixes plus a flag for autogroup:internet, which
