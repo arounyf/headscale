@@ -2,7 +2,7 @@ name: Build and Push (runyf)
 
 on:
   push:
-    branches: [ v0.29.0-runyf ]
+    branches: [ hs-admin ]
     tags: [ 'v*' ]
   workflow_dispatch:
 
