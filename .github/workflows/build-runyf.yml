@@ -72,3 +72,61 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: headscale-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD~ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            echo "## Changes since $PREV_TAG" > /tmp/notes.md
+            echo '```' >> /tmp/notes.md
+            git log --oneline $PREV_TAG..HEAD >> /tmp/notes.md
+            echo '```' >> /tmp/notes.md
+          else
+            echo "## Commits" > /tmp/notes.md
+            echo '```' >> /tmp/notes.md
+            git log --oneline --max-count=20 >> /tmp/notes.md
+            echo '```' >> /tmp/notes.md
+          fi
+          echo "" >> /tmp/notes.md
+          echo "### Docker" >> /tmp/notes.md
+          echo "\`docker pull runyf/headscale:${GITHUB_REF_NAME}\`" >> /tmp/notes.md
+
+      - name: Package and rename
+        run: |
+          cd artifacts
+          mkdir -p ../release
+          for f in headscale-linux-*; do
+            arch=$(echo $f | sed 's/headscale-linux-//')
+            cp $f/headscale ../release/headscale-linux-${arch}
+          done
+          ls -la ../release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: /tmp/notes.md
+          files: release/*
+          draft: false
+          prerelease: false
