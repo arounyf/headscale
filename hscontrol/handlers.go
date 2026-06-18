@@ -292,18 +292,24 @@ func (h *Headscale) VersionHandler(
 
 type AuthProviderWeb struct {
 	serverURL string
+	adminURL  string // 管理后台地址，注册链接指向此地址而非 serverURL
 }
 
-func NewAuthProviderWeb(serverURL string) *AuthProviderWeb {
+func NewAuthProviderWeb(serverURL, adminURL string) *AuthProviderWeb {
 	return &AuthProviderWeb{
 		serverURL: serverURL,
+		adminURL:  adminURL,
 	}
 }
 
 func (a *AuthProviderWeb) RegisterURL(authID types.AuthID) string {
+	base := a.serverURL
+	if a.adminURL != "" {
+		base = a.adminURL
+	}
 	return fmt.Sprintf(
 		"%s/register/%s",
-		strings.TrimSuffix(a.serverURL, "/"),
+		strings.TrimSuffix(base, "/"),
 		authID.String())
 }
 
@@ -366,6 +372,15 @@ func (a *AuthProviderWeb) RegisterHandler(
 	authId, err := authIDFromRequest(req)
 	if err != nil {
 		httpError(writer, err)
+		return
+	}
+
+	// 如果配置了管理后台地址，重定向到管理后台的注册页面
+	if a.adminURL != "" {
+		target := fmt.Sprintf("%s/register/%s",
+			strings.TrimSuffix(a.adminURL, "/"),
+			authId.String())
+		http.Redirect(writer, req, target, http.StatusFound)
 		return
 	}
 

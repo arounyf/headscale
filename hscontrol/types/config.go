@@ -96,6 +96,7 @@ type NodeConfig struct {
 // Config contains the initial Headscale configuration.
 type Config struct {
 	ServerURL           string
+	AdminURL            string // 管理后台地址，注册链接指向此地址
 	Addr                string
 	MetricsAddr         string
 	GRPCAddr            string
@@ -1209,6 +1210,7 @@ func LoadServerConfig() (*Config, error) {
 
 	return &Config{
 		ServerURL:          serverURL,
+		AdminURL:           viper.GetString("admin_url"),
 		Addr:               viper.GetString("listen_addr"),
 		MetricsAddr:        viper.GetString("metrics_listen_addr"),
 		GRPCAddr:           viper.GetString("grpc_listen_addr"),
