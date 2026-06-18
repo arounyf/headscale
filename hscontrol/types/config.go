@@ -235,6 +235,7 @@ type OIDCConfig struct {
 type DERPConfig struct {
 	ServerEnabled                      bool
 	AutomaticallyAddEmbeddedDerpRegion bool
+	ServerInsecureForTests             bool
 	ServerRegionID                     int
 	ServerRegionCode                   string
 	ServerRegionName                   string
@@ -696,6 +697,7 @@ func derpConfig() DERPConfig {
 	serverRegionCode := viper.GetString("derp.server.region_code")
 	serverRegionName := viper.GetString("derp.server.region_name")
 	serverVerifyClients := viper.GetBool("derp.server.verify_clients")
+	serverInsecureForTests := viper.GetBool("derp.server.insecure_for_tests")
 	stunAddr := viper.GetString("derp.server.stun_listen_addr")
 	privateKeyPath := util.AbsolutePathFromConfigPath(
 		viper.GetString("derp.server.private_key_path"),
@@ -745,6 +747,7 @@ func derpConfig() DERPConfig {
 		ServerRegionCode:                   serverRegionCode,
 		ServerRegionName:                   serverRegionName,
 		ServerVerifyClients:                serverVerifyClients,
+			ServerInsecureForTests:             serverInsecureForTests,
 		ServerPrivateKeyPath:               privateKeyPath,
 		STUNAddr:                           stunAddr,
 		URLs:                               urls,
