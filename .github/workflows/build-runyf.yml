@@ -38,41 +38,6 @@ jobs:
           name: headscale-${{ matrix.goos }}-${{ matrix.goarch }}
           path: headscale
 
-  docker:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: runyf/headscale
-          tags: |
-            type=ref,event=tag
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=v0.29-runyf
-            type=sha,prefix=
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
-
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: binary
@@ -107,11 +72,8 @@ jobs:
             git log --oneline --max-count=20 >> /tmp/notes.md
             echo '```' >> /tmp/notes.md
           fi
-          echo "" >> /tmp/notes.md
-          echo "### Docker" >> /tmp/notes.md
-          echo "\`docker pull runyf/headscale:${GITHUB_REF_NAME}\`" >> /tmp/notes.md
 
-      - name: Package and rename
+      - name: Package binaries
         run: |
           cd artifacts
           mkdir -p ../release
@@ -119,7 +81,6 @@ jobs:
             arch=$(echo $f | sed 's/headscale-linux-//')
             cp $f/headscale ../release/headscale-linux-${arch}
           done
-          ls -la ../release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
