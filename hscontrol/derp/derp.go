@@ -126,6 +126,17 @@ func GetDERPMap(cfg types.DERPConfig) (*tailcfg.DERPMap, error) {
 	}
 
 	derpMap := mergeDERPMaps(derpMaps)
+
+	// Apply insecure_for_tests to all DERP nodes (both embedded and external).
+	// When enabled, clients will skip TLS verification for self-signed certs.
+	if cfg.ServerInsecureForTests {
+		for _, region := range derpMap.Regions {
+			for _, node := range region.Nodes {
+				node.InsecureForTests = true
+			}
+		}
+	}
+
 	shuffleDERPMap(derpMap)
 
 	return derpMap, nil
