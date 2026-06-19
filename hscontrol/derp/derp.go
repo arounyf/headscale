@@ -28,16 +28,41 @@ func loadDERPMapFromPath(path string) (*tailcfg.DERPMap, error) {
 	}
 	defer derpFile.Close()
 
-	var derpMap tailcfg.DERPMap
-
 	b, err := io.ReadAll(derpFile)
 	if err != nil {
 		return nil, err
 	}
 
-	err = yaml.Unmarshal(b, &derpMap)
+	// First pass: parse as generic YAML to extract per-node insecure_for_tests,
+	// which the tailcfg struct doesn't have a yaml tag for (only json).
+	var raw struct {
+		Regions map[int]struct {
+			Nodes []struct {
+				Name             string `yaml:"name"`
+				InsecureForTests bool   `yaml:"insecure_for_tests"`
+			} `yaml:"nodes"`
+		} `yaml:"regions"`
+	}
+	_ = yaml.Unmarshal(b, &raw)
 
-	return &derpMap, err
+	var derpMap tailcfg.DERPMap
+	err = yaml.Unmarshal(b, &derpMap)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply per-node insecure_for_tests from the raw parse
+	for regionID, region := range derpMap.Regions {
+		if rawRegion, ok := raw.Regions[regionID]; ok {
+			for i, node := range region.Nodes {
+				if i < len(rawRegion.Nodes) && rawRegion.Nodes[i].InsecureForTests {
+					node.InsecureForTests = true
+				}
+			}
+		}
+	}
+
+	return &derpMap, nil
 }
 
 func loadDERPMapFromURL(addr url.URL) (*tailcfg.DERPMap, error) {
