@@ -743,6 +743,21 @@ func compileAutogroupSelf(
 		return nil
 	}
 
+	// Merge same-user subnet routes into source IPs so that
+	// traffic originating from advertised subnets (e.g. 192.168.6.5 → 192.168.8.10)
+	// also matches autogroup:self. Node IPs are already included via
+	// filterSourcesToSameUser above; this adds the CIDR prefixes.
+	var srcIPsWithRoutes netipx.IPSetBuilder
+	for _, pfx := range srcResolved.Prefixes() {
+		srcIPsWithRoutes.AddPrefix(pfx)
+	}
+	for _, n := range sameUserNodes {
+		for _, route := range n.SubnetRoutes() {
+			srcIPsWithRoutes.AddPrefix(route)
+		}
+	}
+	srcResolvedWithRoutes, _ := newResolved(&srcIPsWithRoutes)
+
 	// DstPorts rules from InternetProtocols.
 	for _, ipp := range cg.self.internetProtocols {
 		var destPorts []tailcfg.NetPortRange
@@ -775,7 +790,7 @@ func compileAutogroupSelf(
 
 		if len(destPorts) > 0 {
 			rules = append(rules, tailcfg.FilterRule{
-				SrcIPs:   srcResolved.Strings(),
+				SrcIPs:   srcResolvedWithRoutes.Strings(),
 				DstPorts: destPorts,
 				IPProto:  ipp.Protocol.toIANAProtocolNumbers(),
 			})
@@ -809,7 +824,7 @@ func compileAutogroupSelf(
 
 		if len(capGrants) > 0 {
 			rules = append(rules, tailcfg.FilterRule{
-				SrcIPs:   srcResolved.Strings(),
+				SrcIPs:   srcResolvedWithRoutes.Strings(),
 				CapGrant: capGrants,
 			})
 
@@ -817,7 +832,7 @@ func compileAutogroupSelf(
 				rules,
 				companionCapGrantRules(
 					dstIPStrings,
-					srcResolved.Prefixes(),
+					srcResolvedWithRoutes.Prefixes(),
 					cg.self.app,
 				)...,
 			)
