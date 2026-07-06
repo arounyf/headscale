@@ -63,6 +63,47 @@ Do not create new files unless strictly necessary. Do not generate helper
 abstractions, wrapper utilities, or "just in case" configuration. Three
 similar lines of code is better than a premature abstraction.
 
+### Test server: always hot-swap, never rebuild
+
+The test server `192.168.6.12` runs headscale + Admin-Pro in Docker. The
+container is a **static shell** — only the files inside `/app` change.
+
+**MANDATORY:**
+
+1. **Always update `/app` files, never recreate the container.** For any
+   change (Flask code, headscale binary, config), rsync/scp into
+   `/root/hs-admin/app/` and restart the process inside the container.
+2. **Only pull a new Docker image when the user explicitly says so.**
+   Otherwise assume hot-swap of `/app` contents.
+3. **Before any change**, check current state: `docker ps`, which ports
+   are in use, confirm the container name is `hs-admin`.
+
+Deploy pattern:
+
+```bash
+# Flask code change — rsync then restart python3 in container
+rsync -avz --exclude='config.yaml' --exclude='headscale' \
+  /root/Headscale-Admin-Pro/ root@192.168.6.12:/root/hs-admin/app/
+ssh root@192.168.6.12 'docker restart hs-admin'
+
+# headscale binary change — scp then replace inside container
+scp headscale root@192.168.6.12:/root/hs-admin/app/headscale
+ssh root@192.168.6.12 '
+  docker exec hs-admin cp /app/headscale /usr/bin/headscale
+  docker exec hs-admin pkill headscale
+'
+```
+
+Client machine `192.168.6.63` is for running tailscale test nodes:
+
+```bash
+ssh root@192.168.6.63
+tailscaled --state=mem: --statedir=/tmp/ts-<name> --tun=userspace-networking \
+  --port=<unique_port> --socket=/tmp/ts-<name>/tailscaled.sock &
+tailscale --socket=/tmp/ts-<name>/tailscaled.sock up \
+  --login-server=http://192.168.6.12:8080 --auth-key=<key> --hostname=<name>
+```
+
 ## Quick Start
 
 ```bash
