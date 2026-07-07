@@ -317,14 +317,15 @@ Key reminders:
 - **Tests**: prefer `hscontrol/servertest/` for server-level tests that
   don't need Docker — faster than full integration tests.
 
-- **Release tags** follow the format `v{upstream}-runyf.{build}`:
+- **Release tags** follow the format `v{upstream}-hs.{build}`:
   - `{upstream}` — the upstream headscale version (e.g. `0.29.1`)
   - `{build}` — sequential build number, starting from `1`
-  - Example: `v0.29.1-runyf.1`, `v0.29.0-runyf.1`
+  - Example: `v0.29.1-hs.1`, `v0.29.0-hs.1`
+  - Beta: `v0.29.2-hs.1-beta.1`
   - The tag name determines the GitHub Release asset download URL
-    (`/releases/download/v0.29.1-runyf.1/headscale`), so downstream
+    (`/releases/download/v0.29.1-hs.1/headscale`), so downstream
     consumers (Dockerfile, init scripts) must match exactly.
-  - Do NOT omit the `.1` suffix — it distinguishes runyf builds from
+  - Do NOT omit the `.1` suffix — it distinguishes hs builds from
     upstream tags (`v0.29.1`).
 
 ## Gotchas
