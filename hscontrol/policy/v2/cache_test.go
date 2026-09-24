@@ -4,11 +4,32 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/juanfont/headscale/hscontrol/policy/matcher"
 	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/puzpuzpuz/xsync/v4"
 	"gorm.io/gorm"
 	"net/netip"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/views"
 )
+
+// newTestPolicyManager wires a PolicyManager for cache tests. The
+// lazily-allocated per-node maps must exist because updateLocked clears
+// them on its first run, and a nil xsync.Map panics on Clear.
+func newTestPolicyManager(
+	pol *Policy,
+	users []types.User,
+	nodes views.Slice[types.NodeView],
+) *PolicyManager {
+	return &PolicyManager{
+		pol:                pol,
+		users:              users,
+		nodes:              nodes,
+		sshPolicyMap:       xsync.NewMap[types.NodeID, *tailcfg.SSHPolicy](),
+		filterRulesMap:     xsync.NewMap[types.NodeID, []tailcfg.FilterRule](),
+		matchersForNodeMap: xsync.NewMap[types.NodeID, []matcher.Match](),
+	}
+}
 
 func TestAutogroupSelfCache_Hit(t *testing.T) {
 	users := types.Users{{Model: gorm.Model{ID: 1}, Name: "user1"}}
@@ -27,9 +48,7 @@ func TestAutogroupSelfCache_Hit(t *testing.T) {
 	}
 
 	nodesSlice := nodes.ViewSlice()
-	pm := &PolicyManager{
-		pol: policy2, users: []types.User{users[0]}, nodes: nodesSlice,
-	}
+	pm := newTestPolicyManager(policy2, []types.User{users[0]}, nodesSlice)
 	_, _ = pm.updateLocked()
 
 	r0 := pm.filterRulesForNodeLocked(nodesSlice.At(0))
@@ -74,9 +93,7 @@ func TestAutogroupSelfCache_UserIsolation(t *testing.T) {
 	}
 
 	nodesSlice := nodes.ViewSlice()
-	pm := &PolicyManager{
-		pol: policy2, users: []types.User{users[0], users[1]}, nodes: nodesSlice,
-	}
+	pm := newTestPolicyManager(policy2, []types.User{users[0], users[1]}, nodesSlice)
 	_, _ = pm.updateLocked()
 
 	pm.filterRulesForNodeLocked(nodesSlice.At(0))
@@ -103,9 +120,7 @@ func TestAutogroupSelfCache_ClearedOnPolicyChange(t *testing.T) {
 	}
 
 	nodesSlice := nodes.ViewSlice()
-	pm := &PolicyManager{
-		pol: policy2, users: []types.User{users[0]}, nodes: nodesSlice,
-	}
+	pm := newTestPolicyManager(policy2, []types.User{users[0]}, nodesSlice)
 	_, _ = pm.updateLocked()
 
 	pm.filterRulesForNodeLocked(nodesSlice.At(0))
@@ -166,9 +181,7 @@ func TestAutogroupSelfCache_Scale(t *testing.T) {
 	}
 
 	nodesSlice := nodes.ViewSlice()
-	pm := &PolicyManager{
-		pol: policy2, users: users, nodes: nodesSlice,
-	}
+	pm := newTestPolicyManager(policy2, users, nodesSlice)
 	_, _ = pm.updateLocked()
 
 	t.Logf("Scale test: %d users × %d nodes = %d total nodes", nUsers, nodesPerUser, totalNodes)
