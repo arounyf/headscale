@@ -556,6 +556,29 @@ func (node *Node) Proto() *v1.Node {
 		nodeProto.Expiry = timestamppb.New(*node.Expiry)
 	}
 
+	if node.Hostinfo != nil {
+		// Desktop, Container and Userspace are opt.Bool, i.e. tri-state. The
+		// proto fields are plain proto3 scalars without presence, so an
+		// unreported value collapses into false here.
+		desktop, _ := node.Hostinfo.Desktop.Get()
+		container, _ := node.Hostinfo.Container.Get()
+		userspace, _ := node.Hostinfo.Userspace.Get()
+
+		nodeProto.HostInfo = &v1.HostInfo{
+			Os:            node.Hostinfo.OS,
+			OsVersion:     node.Hostinfo.OSVersion,
+			IpnVersion:    node.Hostinfo.IPNVersion,
+			Machine:       node.Hostinfo.Machine,
+			DeviceModel:   node.Hostinfo.DeviceModel,
+			Distro:        node.Hostinfo.Distro,
+			DistroVersion: node.Hostinfo.DistroVersion,
+			GoVersion:     node.Hostinfo.GoVersion,
+			Desktop:       desktop,
+			Container:     container,
+			Userspace:     userspace,
+		}
+	}
+
 	return nodeProto
 }
 
