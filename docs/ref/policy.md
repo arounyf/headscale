@@ -13,7 +13,8 @@ its path in the `policy.path` key in the [configuration file](configuration.md).
 
 Headscale needs to be reloaded to pick up changes to the policy file. Either reload Headscale via its systemd service
 (`sudo systemctl reload headscale`) or by sending a SIGHUP signal (`sudo kill -HUP $(pidof headscale)`) to the main
-process. Headscale logs the result of policy processing after each reload.
+process. Headscale logs the result of policy processing after each reload. A policy stored with `headscale policy set`
+is applied immediately, without a reload.
 
 Please have a look at Tailscale's policy related documentation to learn more:
 
@@ -242,8 +243,9 @@ fine-grained configuration instead.
 }
 ```
 
-[^1]: Headscale also allows to store the policy in the database. This is typically only required in case a [web
-    interface](integration/web-ui.md) is used.
+[^1]: Headscale also allows to store the policy in the database by setting `policy.mode` to `database`. This is typically
+    only required in case a [web interface](integration/web-ui.md) is used. Both modes are managed with `headscale
+    policy set`, which validates the policy first and stores it only once it is known to be usable.
 
 [^2]: Other key-only node attributes can be used as well. Find them in the client source code with `grep -E '^\s+NodeAttr\w+' tailcfg/tailcfg.go` or by using [GitHub code search (requires
     login)](https://github.com/search?q=repo%3Atailscale%2Ftailscale%20language%3Ago%20path%3Atailcfg%2Ftailcfg.go%20symbol%3A%2FNodeAttr%5Cw%2B%2F&type=code).

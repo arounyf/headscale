@@ -147,10 +147,17 @@ in their output of `tailscale status`. Traffic is still filtered according to th
 
 See also <https://tailscale.com/docs/concepts/device-visibility>.
 
-## My policy is stored in the database and Headscale refuses to start due to an invalid policy. How can I recover?
+## My policy is invalid and Headscale refuses to start. How can I recover?
 
 Headscale checks if the policy is valid during startup and refuses to start if it detects an error. The error message
-indicates which part of the policy is invalid. Follow these steps to fix your policy:
+indicates which part of the policy is invalid. Where the invalid policy is stored depends on `policy.mode`.
+
+With `policy.mode: file` (the default) the policy is the file at `policy.path`. Fix that file, either in place followed
+by a reload, or by storing the corrected version with `headscale policy set --file policy.json`, which validates the
+policy before it replaces the file.
+
+With `policy.mode: database` the policy is a row in the database and is loaded by the very server that will not start.
+Follow these steps to fix your policy:
 
 - Dump the policy to a file: `headscale policy get --bypass-grpc-and-access-database-directly > policy.json`
 - Edit and fixup `policy.json`. Use the command `headscale policy check --file policy.json` to validate the policy.
