@@ -1278,9 +1278,11 @@ func (s *State) GetPolicy() (*types.Policy, error) {
 	return s.db.GetPolicy()
 }
 
-// SetPolicyInDB stores policy data in the database.
-func (s *State) SetPolicyInDB(data string) (*types.Policy, error) {
-	return s.db.SetPolicy(data)
+// SetPolicyInStore stores policy data in the location selected by the
+// configured policy mode: a database row, or the file referenced by
+// policy.path.
+func (s *State) SetPolicyInStore(data string) error {
+	return s.db.SetPolicyBytes(s.cfg, data)
 }
 
 // GetNodePrimaryRoutes returns the primary routes for a node.

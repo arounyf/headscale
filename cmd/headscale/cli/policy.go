@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -21,19 +22,20 @@ var errAborted = errors.New("command aborted by user")
 
 // bypassDatabase loads the server config and opens the database directly,
 // bypassing the gRPC server. The caller is responsible for closing the
-// returned database handle.
-func bypassDatabase() (*db.HSDatabase, error) {
+// returned database handle. The config is returned alongside it because the
+// storage location of the policy (database or file) depends on it.
+func bypassDatabase() (*db.HSDatabase, *types.Config, error) {
 	cfg, err := types.LoadServerConfig()
 	if err != nil {
-		return nil, fmt.Errorf("loading config: %w", err)
+		return nil, nil, fmt.Errorf("loading config: %w", err)
 	}
 
 	d, err := db.NewHeadscaleDatabase(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("opening database: %w", err)
+		return nil, nil, fmt.Errorf("opening database: %w", err)
 	}
 
-	return d, nil
+	return d, cfg, nil
 }
 
 func init() {
@@ -70,7 +72,7 @@ var getPolicy = &cobra.Command{
 				return errAborted
 			}
 
-			d, err := bypassDatabase()
+			d, _, err := bypassDatabase()
 			if err != nil {
 				return err
 			}
@@ -111,7 +113,9 @@ var setPolicy = &cobra.Command{
 	Short: "Updates the ACL Policy",
 	Long: `
 	Updates the existing ACL Policy with the provided policy. The policy must be a valid HuJSON object.
-	This command only works when the acl.policy_mode is set to "db", and the policy will be stored in the database.`,
+	It is validated first and stored only once it is known to be usable, so an invalid policy never
+	replaces the current one. Where it is stored follows policy.mode: "database" writes a row,
+	"file" replaces the file at policy.path.`,
 	Aliases: []string{"put", "update"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		policyPath, _ := cmd.Flags().GetString("file")
@@ -126,7 +130,7 @@ var setPolicy = &cobra.Command{
 				return errAborted
 			}
 
-			d, err := bypassDatabase()
+			d, cfg, err := bypassDatabase()
 			if err != nil {
 				return err
 			}
@@ -137,12 +141,18 @@ var setPolicy = &cobra.Command{
 				return fmt.Errorf("loading users for policy validation: %w", err)
 			}
 
-			_, err = policy.NewPolicyManager(policyBytes, users, views.Slice[types.NodeView]{})
+			// The parser standardises HuJSON in place, replacing comments with
+			// whitespace, so hand it a copy: policyBytes below is what gets
+			// stored, and it must reach the destination exactly as it was read.
+			_, err = policy.NewPolicyManager(bytes.Clone(policyBytes), users, views.Slice[types.NodeView]{})
 			if err != nil {
 				return fmt.Errorf("parsing policy file: %w", err)
 			}
 
-			_, err = d.SetPolicy(string(policyBytes))
+			// Store where policy.mode says: a database row, or the file at
+			// policy.path. Writing the database unconditionally, as this used
+			// to, silently did nothing in file mode.
+			err = d.SetPolicyBytes(cfg, string(policyBytes))
 			if err != nil {
 				return fmt.Errorf("setting ACL policy: %w", err)
 			}
@@ -189,7 +199,7 @@ var checkPolicy = &cobra.Command{
 				return errAborted
 			}
 
-			d, err := bypassDatabase()
+			d, _, err := bypassDatabase()
 			if err != nil {
 				return err
 			}

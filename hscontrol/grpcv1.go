@@ -726,10 +726,6 @@ func (api headscaleV1APIServer) SetPolicy(
 	_ context.Context,
 	request *v1.SetPolicyRequest,
 ) (*v1.SetPolicyResponse, error) {
-	if api.h.cfg.Policy.Mode != types.PolicyModeDB {
-		return nil, types.ErrPolicyUpdateIsDisabled
-	}
-
 	p := request.GetPolicy()
 
 	// Validate and reject configuration that would error when applied
@@ -751,9 +747,12 @@ func (api headscaleV1APIServer) SetPolicy(
 		}
 	}
 
-	updated, err := api.h.state.SetPolicyInDB(p)
+	// Store only after the policy is known to be usable. In file mode the
+	// bytes written here are what headscale loads on its next start, so a
+	// policy that fails to parse would stop the server from booting.
+	err = api.h.state.SetPolicyInStore(p)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("storing policy: %w", err)
 	}
 
 	// Always reload policy to ensure route re-evaluation, even if policy content hasn't changed.
@@ -772,9 +771,12 @@ func (api headscaleV1APIServer) SetPolicy(
 			Msg("No policy changes to distribute because ReloadPolicy returned empty changeset")
 	}
 
+	// The stored policy is the one just submitted: in database mode the row
+	// holds it verbatim, in file mode the file does. UpdatedAt is the write
+	// time, as there is no database row to take a timestamp from in file mode.
 	response := &v1.SetPolicyResponse{
-		Policy:    updated.Data,
-		UpdatedAt: timestamppb.New(updated.UpdatedAt),
+		Policy:    p,
+		UpdatedAt: timestamppb.Now(),
 	}
 
 	log.Debug().
