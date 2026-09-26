@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"os"
 	"slices"
 	"sync"
 	"testing"
@@ -12,7 +13,6 @@ import (
 	"github.com/juanfont/headscale/hscontrol/servertest"
 	"github.com/juanfont/headscale/hscontrol/state"
 	"github.com/juanfont/headscale/hscontrol/types"
-	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 	"tailscale.com/tailcfg"
@@ -398,12 +398,16 @@ func snapshotPrimaries(
 // for little extra coverage.
 func TestHAProberProperty(t *testing.T) {
 	// Per-check wall-cost is ~15-25s (real Noise handshake on each
-	// reconnect), so the default 100-check rapid budget blows past
-	// the 10-minute go test timeout used by the Tests workflow.
-	// Skip on CI by default so the everyday sweep stays fast; runs
-	// locally so seed shrinking works without an opt-in flag.
-	if util.IsCI() {
-		t.Skip("skipping HA prober property test in CI; runs locally")
+	// reconnect), so the default 100-check rapid budget is a 25-40
+	// minute run. Upstream gated this on "skip on CI, run locally",
+	// which meant a bare `go test ./...` (and `make test`) exceeded
+	// go test's default 10-minute per-package timeout and failed on
+	// any local machine. Opt in explicitly instead so the everyday
+	// sweep stays green; shrinking a seed is still one env var away:
+	//
+	//	HS_HA_PROPERTY=1 go test -timeout 45m -run TestHAProberProperty ./hscontrol/servertest/
+	if os.Getenv("HS_HA_PROPERTY") != "1" {
+		t.Skip("skipping HA prober property test; set HS_HA_PROPERTY=1 to run it (~30 min)")
 	}
 
 	if testing.Short() {
