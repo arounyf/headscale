@@ -317,16 +317,19 @@ Key reminders:
 - **Tests**: prefer `hscontrol/servertest/` for server-level tests that
   don't need Docker — faster than full integration tests.
 
-- **Release tags** follow the format `v{upstream}-hs.{build}`:
-  - `{upstream}` — the upstream headscale version (e.g. `0.29.1`)
-  - `{build}` — sequential build number, starting from `1`
-  - Example: `v0.29.1-hs.1`, `v0.29.0-hs.1`
-  - Beta: `v0.29.2-hs.1-beta.1`
+- **Release tags** follow the format `v{upstream}-hs`:
+  - `{upstream}` — the upstream headscale version (e.g. `0.29.4`)
+  - Example: `v0.29.4-hs`, `v0.29.3-hs`
+  - One tag per upstream version, with no build suffix. An hs build of
+    upstream `0.29.4` is `v0.29.4-hs`, which is already distinct from the
+    upstream tag `v0.29.4`.
   - The tag name determines the GitHub Release asset download URL
-    (`/releases/download/v0.29.1-hs.1/headscale`), so downstream
-    consumers (Dockerfile, init scripts) must match exactly.
-  - Do NOT omit the `.1` suffix — it distinguishes hs builds from
-    upstream tags (`v0.29.1`).
+    (`/releases/download/v0.29.4-hs/headscale`), so downstream consumers
+    (Dockerfile, init scripts) must match exactly.
+  - Releasing again on the same upstream version means moving the tag to
+    the new commit and re-uploading the asset (`git push --force` the
+    tag); `.github/workflows/build-runyf.yml` rebuilds it on tag push.
+    Anything already downloaded from that release is not updated.
 
 ## Gotchas
 
