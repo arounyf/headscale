@@ -328,9 +328,10 @@ func TestMultipleRoutesPerUser(t *testing.T) {
 	r2 := netip.MustParsePrefix("10.20.0.0/24")
 	r3 := netip.MustParsePrefix("192.168.0.0/16")
 
-	// A advertises r1+r2, B advertises r3
-	advertiseAndApproveRoute(t, srv, aRouter, r1)
-	advertiseAndApproveRoute(t, srv, aRouter, r2)
+	// A advertises r1+r2, B advertises r3. A's two routes go in a single
+	// call: the helper replaces the advertised and approved sets, so a
+	// second call for the same router would drop r1 from both.
+	advertiseAndApproveRoute(t, srv, aRouter, r1, r2)
 	advertiseAndApproveRoute(t, srv, bRouter, r3)
 
 	aNodeID := findNodeID(t, srv, "a-node")

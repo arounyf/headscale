@@ -16,19 +16,23 @@ import (
 )
 
 // advertiseAndApproveRoute sets [tailcfg.Hostinfo.RoutableIPs] on a client and approves
-// the route on the server. Returns the node ID.
+// the routes on the server. Returns the node ID.
+//
+// Both sets are replaced, never extended: a real client sends its full
+// RoutableIPs list on every map request, and [SetApprovedRoutes] is a set.
+// A node that should hold several routes must name all of them in one call.
 func advertiseAndApproveRoute(
 	t *testing.T,
 	srv *servertest.TestServer,
 	c *servertest.TestClient,
-	route netip.Prefix,
+	routes ...netip.Prefix,
 ) types.NodeID {
 	t.Helper()
 
 	c.Direct().SetHostinfo(&tailcfg.Hostinfo{
 		BackendLogID: "servertest-" + c.Name,
 		Hostname:     c.Name,
-		RoutableIPs:  []netip.Prefix{route},
+		RoutableIPs:  routes,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -38,7 +42,7 @@ func advertiseAndApproveRoute(
 
 	nodeID := findNodeID(t, srv, c.Name)
 
-	_, rc, err := srv.State().SetApprovedRoutes(nodeID, []netip.Prefix{route})
+	_, rc, err := srv.State().SetApprovedRoutes(nodeID, routes)
 	require.NoError(t, err)
 	srv.App.Change(rc)
 
