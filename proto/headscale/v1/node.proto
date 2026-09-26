@@ -53,6 +53,31 @@ message Node {
   repeated string available_routes = 24;
   repeated string subnet_routes = 25;
   repeated string tags = 26;
+
+  HostInfo host_info = 27;
+}
+
+// HostInfo is the subset of the client-reported tailcfg.Hostinfo that the
+// server already holds for every node and that is safe to expose to API
+// clients. It is a typed message rather than the raw JSON blob that the
+// reserved field 15 used to carry, so that consumers do not have to depend
+// on the client's serialisation details.
+message HostInfo {
+  string os = 1;
+  string os_version = 2;
+  string ipn_version = 3;
+  string machine = 4;
+  string device_model = 5;
+  string distro = 6;
+  string distro_version = 7;
+  string go_version = 8;
+
+  // The three below are opt.Bool in tailcfg.Hostinfo, i.e. tri-state
+  // (true/false/not reported). proto3 scalars have no presence here, so an
+  // unreported value is indistinguishable from an explicit false.
+  bool desktop = 9;
+  bool container = 10;
+  bool userspace = 11;
 }
 
 message RegisterNodeRequest {
